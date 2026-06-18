@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Fast pre-commit hook: gofmt + go vet on staged Go files.
+# Install with: make hooks
+set -euo pipefail
+
+staged_go=$(git diff --cached --name-only --diff-filter=ACM | grep '\.go$' || true)
+if [ -z "$staged_go" ]; then
+  exit 0
+fi
+
+unformatted=$(echo "$staged_go" | xargs gofmt -l)
+if [ -n "$unformatted" ]; then
+  echo "pre-commit: gofmt would reformat:"
+  echo "$unformatted"
+  echo "Run: make fmt   then re-stage."
+  exit 1
+fi
+
+if ! go vet ./... >/dev/null 2>&1; then
+  echo "pre-commit: go vet failed. Run: go vet ./..."
+  exit 1
+fi
+
+exit 0
