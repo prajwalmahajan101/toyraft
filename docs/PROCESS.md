@@ -176,12 +176,14 @@ is "we'll remember":
 | Mechanism | What it enforces | Where it lives |
 | --------- | ---------------- | -------------- |
 | **PR template** | ADR/RFC linkage, journal-per-phase, no spec drift, branch naming, conventional-commit subject | `.github/pull_request_template.md` (DOC-15 / PROC-05) |
-| **commitlint CI** | Conventional Commits subject format | `.github/workflows/ci.yml` + `commitlint.config.js` (PROC-08, Phase 14) |
-| **`make hooks`** | Pre-commit `gofmt + go vet`; commit-msg `commitlint` | `scripts/install-hooks.sh` (QUAL-10, Phase 14) |
+| **commitlint CI** | Conventional Commits subject format | `.github/workflows/ci.yml` + `commitlint.config.js` (PROC-08, Phase 1.1) |
+| **`make hooks`** | Pre-commit `gofmt + go vet`; commit-msg Conventional Commits regex | `Makefile` `hooks` target + `.githooks/` (QUAL-10, Phase 1.1) |
 
-The PR template ships in Phase 1 (this milestone — DOC-15 / PROC-05).
-The CI workflow + commitlint config + hook installer ship in Phase 14
-alongside the first release.
+The PR template ships in Phase 1 (DOC-15 / PROC-05). The CI workflow,
+commitlint config, and local `make hooks` installer all ship in
+**Phase 1.1** (CI bootstrap) — see [ADR-0002](./adr/0002-bring-ci-forward.md)
+for the rationale on bringing CI forward from Phase 14, and that ADR for
+the canonical list of required-check job names enforced on `main`.
 
 ## Skill Bindings (summary)
 

@@ -16,10 +16,10 @@ don't duplicate.
 
 ## Build, Test, Lint
 
-ToyRaft's tooling is driven through `make`. The Makefile itself lands in
-**Phase 14** (release polish — see `.planning/ROADMAP.md`); during
-Phases 2–13 the targets are equivalent to direct `go` invocations
-listed below.
+ToyRaft's tooling is driven through `make`. The **`hooks`** target ships
+in Phase 1.1 (CI bootstrap — see ADR-0002). The remaining build/test/
+chaos/demo targets land in later phases; during Phases 2–13 they are
+equivalent to direct `go` invocations listed below.
 
 | Target            | What it does                                                                            | Direct equivalent                            |
 | ----------------- | --------------------------------------------------------------------------------------- | -------------------------------------------- |
@@ -28,7 +28,7 @@ listed below.
 | `make test-race`  | Runs the full test suite with the race detector (QUAL-02)                               | `go test -race ./...`                        |
 | `make chaos`      | Runs the seeded chaos suite (CHAOS-01)                                                  | `go test -tags=chaos ./test/chaos/...`       |
 | `make lint`       | Runs golangci-lint v2.x with the project's `.golangci.yml` (QUAL-01)                    | `golangci-lint run ./...`                    |
-| `make hooks`      | Installs commitlint + `gofmt` + `go vet` pre-commit hooks (QUAL-10, PROC-08)            | `./scripts/install-hooks.sh`                 |
+| `make hooks`      | Rebinds `core.hooksPath` to `.githooks/` (commit-msg regex + pre-commit gofmt/vet) (QUAL-10, PROC-08) | `git config core.hooksPath .githooks`        |
 | `make demo`       | Boots a 3-node `toyraftd` cluster on `localhost:9001..9003` (DEMO-06)                   | `./scripts/demo.sh`                          |
 
 **Run before every PR:** `make lint` clean + `make test-race` green.
