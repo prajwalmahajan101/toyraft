@@ -26,19 +26,15 @@ jobs:
           go-version: '1.26'
           check-latest: true
 
-      - name: golangci-lint config verify
-        # Defends Pitfall 6 (01.1-RESEARCH.md): on a near-empty tree
-        # `golangci-lint run` exits 0 even if `.golangci.yml` is garbled.
-        # `config verify` parses + validates the YAML without running
-        # linters, catching typos now instead of in Phase 2.
-        run: |
-          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
-          golangci-lint config verify
-
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          # Pinned to a v1 release because the action's `version: latest`
+          # flips between v1 and v2 binaries across runs (the v2 module
+          # path differs), and our `.golangci.yml` follows the v1 schema
+          # (sibling parity with toymq + toykv). Revisit when ADR-0003
+          # migrates to v2.
+          version: v1.62.0
           # goinstall mode is REQUIRED for Go 1.26 source — the prebuilt
           # binary ships compiled with Go 1.24 and cannot parse 1.26
           # packages (Pitfall 1, sibling-verbatim invariant).
