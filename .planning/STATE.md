@@ -1,7 +1,7 @@
 # ToyRaft — Project State
 
 **Initialised:** 2026-06-18
-**Updated:** 2026-06-18 — completed Phase 1 Plan 2 (PRD/HLD/FLOWS) and Plan 3 (LLD/WIRE) on parallel waves
+**Updated:** 2026-06-18 — completed Phase 1 Plans 4 and 5 (parallel wave 3); Phase 1 complete
 
 ## Project Reference
 
@@ -14,17 +14,18 @@
 
 ## Current Position
 
-- **Phase:** 1 (Specs & Contracts) — In progress
-- **Plan:** 3/5 complete; next plans: `01-04-PLAN.md` (CONCURRENCY), `01-05-PLAN.md` (TESTING/SECURITY/GLOSSARY/CONTRIBUTING/RELEASE_PLAN/PROCESS + PR template)
-- **Status:** Plan 01-02 (PRD/HLD/FLOWS) + Plan 01-03 (LLD/WIRE) both complete
+- **Phase:** 1 (Specs & Contracts) — Complete
+- **Plan:** 5/5 complete; ready to close Phase 1 with `.journal/M1.md` and merge `feature/specs-and-contracts`
+- **Status:** All 5 Phase 1 plans complete
 - **Branch:** `feature/specs-and-contracts`
-- **Progress:** [██████░░░░] 60%
+- **Progress:** [██████████] 100%
+- **Next phase:** Phase 2 — Foundations (`feature/foundations`), starts with FOUND-01..FOUND-05
 
 ## Performance Metrics
 
-- Phases complete: 0/14
-- Plans complete: 3/5 (in Phase 1)
-- Requirements satisfied: 0/116 (Plan 01-01 partial: DOC-14, PROC-04, PROC-05, DOC-13 template-only; Plan 01-02: DOC-01, DOC-02, DOC-08; Plan 01-03: DOC-03, DOC-04 spec-only — implementations land Phase 2+)
+- Phases complete: 1/14 (Phase 1 — Specs & Contracts)
+- Plans complete: 5/5 (in Phase 1)
+- Requirements satisfied: 0/116 implementations; spec-only: Phase 1 lands DOC-01..DOC-15 + PROC-04 + PROC-05 (Plan 01-05: DOC-09, DOC-10, DOC-11, DOC-12, DOC-13 second half) — implementations land Phase 2+
 - ADRs written: 1/15 (target) — ADR-0000 meta
 - Journal entries: 0/14
 
@@ -35,6 +36,8 @@
 | 01 | 01 | ~2 min | 3 | 5 |
 | 01 | 02 | ~4 min | 3 | 3 |
 | 01 | 03 | ~6 min | 2 | 2 |
+| 01 | 04 | ~6 min | 3 | 3 |
+| 01 | 05 | ~5 min | 3 | 5 |
 
 ## Accumulated Context
 
@@ -63,6 +66,11 @@
 - **01-03:** Wire error sentinels are snake_case strings (`not_leader`, `stopped`, `proposal_dropped`, …) — append-only list; parsers tolerate unknown values.
 - **01-03:** No URL versioning. v2 uses additive JSON fields + new MessageType values; breaking changes (if any) get a new path chosen in an RFC.
 - **01-03:** `ErrSnapshotUnsupported` lives in `pkg/storage`, re-exported from `pkg/raft` for ergonomic consumer use.
+- **01-05:** RFC 0001 marked Accepted from creation — it IS the scope lock, not a proposal under discussion.
+- **01-05:** Library tags (`v<…>`) and demo binary tags (`toyraftd/v<…>`) partitioned by prefix so the Go module proxy does not cross-notify library consumers about binary releases.
+- **01-05:** RELEASE_PLAN documents `make <target>` plus direct `go` equivalents; Makefile itself lands Phase 14 but the surface is fixed now.
+- **01-05:** Substantive-RFC test expressed as a binary five-item checklist (public symbol / wire schema / documented invariant / v2→v1 promotion / Out-of-Scope table edit) to make reviewer adjudication mechanical.
+- **01-05:** PROCESS is authoritative for governance semantics; CONTRIBUTING is mechanics only. When they disagree, PROCESS wins.
 
 ### Todos
 - (none captured yet)
@@ -72,7 +80,7 @@
 
 ## Session Continuity
 
-- **Last session:** 2026-06-18 — completed `01-02-PLAN.md` (PRD/HLD/FLOWS) and `01-03-PLAN.md` (LLD/WIRE) on parallel wave 2.
-- **Stopped at:** Completed 01-specs-and-contracts/01-03-PLAN.md
-- **Next action:** Execute `01-04-PLAN.md` (CONCURRENCY) then `01-05-PLAN.md` (TESTING/SECURITY/GLOSSARY/CONTRIBUTING/RELEASE_PLAN/PROCESS + PR template).
-- **Resume hint:** Specs landed on `feature/specs-and-contracts`: ADR/RFC/journal/PR templates (01-01); `docs/PRD.md` + `docs/HLD.md` + `docs/FLOWS.md` (01-02); `docs/LLD.md` + `docs/WIRE.md` (01-03). LLD locks the Go public surface — Phase 2+ must compile against it. WIRE locks `POST /raft/message` + 204 + JSON schema for 5 RPC kinds + 307 client redirect for `/kv/{key}`. CONCURRENCY (01-04) should cross-reference LLD §Node + §Storage for the goroutine/lock model and reference REPL-09 fsync-before-RPC invariant.
+- **Last session:** 2026-06-18T14:53:43.457Z
+- **Stopped at:** Completed 01-specs-and-contracts/01-05-PLAN.md — Phase 1 complete
+- **Next action:** Write `.journal/M1.md` (PROC-02), then open PR to merge `feature/specs-and-contracts` → `main`. After merge, open `feature/foundations` branch off `main` and start Phase 2 (FOUND-01..FOUND-05).
+- **Resume hint:** Phase 1 closed with all 12 specs + ADR/RFC/journal/PR templates committed on `feature/specs-and-contracts` before any `feat:` commit (DOC-15 invariant satisfied). Plan 01-05 added GLOSSARY (DOC-09), CONTRIBUTING (DOC-10), RELEASE_PLAN (DOC-11), PROCESS (DOC-12), RFC 0001 (DOC-13 second half). Phase 2 starts with the in-memory `Log` type — likely first ADR-0001 will codify the single-mutex policy. RFC 0001 locks v1 scope: any later plan that wants to widen it must write a superseding RFC.
