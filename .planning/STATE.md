@@ -1,7 +1,7 @@
 # ToyRaft — Project State
 
 **Initialised:** 2026-06-18
-**Updated:** 2026-06-18 — completed Phase 1 Plans 4 and 5 (parallel wave 3); Phase 1 complete
+**Updated:** 2026-06-18 — completed Phase 1.1 Plan 01 (Go module skeleton + .golangci.yml + ADR-0003)
 
 ## Project Reference
 
@@ -14,16 +14,16 @@
 
 ## Current Position
 
-- **Phase:** 1 (Specs & Contracts) — Complete
-- **Plan:** 5/5 complete; ready to close Phase 1 with `.journal/M1.md` and merge `feature/specs-and-contracts`
-- **Status:** Milestone complete
-- **Branch:** `feature/specs-and-contracts`
-- **Progress:** [██████████] 100%
-- **Next phase:** Phase 2 — Foundations (`feature/foundations`), starts with FOUND-01..FOUND-05
+- **Phase:** 1.1 (CI Bootstrap) — In progress (1/4 plans complete)
+- **Plan:** 01.1-02 next (CI workflow + commitlint + build + ADR-0002)
+- **Status:** Phase 1.1 Plan 01 landed Go module skeleton + golangci-lint v2 config + ADR-0003 on `feature/ci-bootstrap`. Two atomic commits: 3caf495 (chore go) and e823cf6 (ci golangci-lint).
+- **Branch:** `feature/ci-bootstrap`
+- **Progress:** Phase 1.1 [██░░░░░░░░] 25% (1/4 plans)
+- **Next phase:** Finish Phase 1.1 (plans 02–04), open PR to merge `feature/ci-bootstrap` → `main`, then Phase 2 (`feature/foundations`).
 
 ## Performance Metrics
 
-- Phases complete: 1/14 (Phase 1 — Specs & Contracts)
+- Phases complete: 1/15 (Phase 1 — Specs & Contracts; Phase 1.1 INSERTED for CI before any Go code)
 - Plans complete: 5/5 (in Phase 1)
 - Requirements satisfied: 0/116 implementations; spec-only: Phase 1 lands DOC-01..DOC-15 + PROC-04 + PROC-05 (Plan 01-05: DOC-09, DOC-10, DOC-11, DOC-12, DOC-13 second half) — implementations land Phase 2+
 - ADRs written: 1/15 (target) — ADR-0000 meta
@@ -38,6 +38,7 @@
 | 01 | 03 | ~6 min | 2 | 2 |
 | 01 | 04 | ~6 min | 3 | 3 |
 | 01 | 05 | ~5 min | 3 | 5 |
+| 01.1 | 01 | ~6 min | 3 | 4 |
 
 ## Accumulated Context
 
@@ -79,6 +80,13 @@
 - **01-05:** RELEASE_PLAN documents `make <target>` plus direct `go` equivalents; Makefile itself lands Phase 14 but the surface is fixed now.
 - **01-05:** Substantive-RFC test expressed as a binary five-item checklist (public symbol / wire schema / documented invariant / v2→v1 promotion / Out-of-Scope table edit) to make reviewer adjudication mechanical.
 - **01-05:** PROCESS is authoritative for governance semantics; CONTRIBUTING is mechanics only. When they disagree, PROCESS wins.
+- **01.1-01:** Pin `go` directive to `1.25` (lowest matrix entry), not the host toolchain default, so the 1.25.x CI matrix cell does not refuse the module.
+- **01.1-01:** Stub `doc.go` with `package toyraft` lands now to retire Pitfall 2 (empty-tree `go test ./...` exit 1) before plan 02's CI workflow runs.
+- **01.1-01:** `.golangci.yml` uses v2 schema with `linters.default: none` + explicit 7-linter enable list (errcheck, govet, ineffassign, staticcheck, unused, misspell, revive) — no silent upgrades on linter-set churn.
+- **01.1-01:** `gosec` deliberately excluded — false-positive rate too high for `math/rand`-with-seeds + unbuffered I/O patterns; ADR-0003 documents the opt-out; Phase 14 may revisit.
+- **01.1-01:** `gosimple` dropped from enable list because v2 merged it into `staticcheck` (intent preserved). ADR-0003 records the merge so future readers do not re-add it.
+- **01.1-01:** Config schema corrected from the planner's v1-style (`linters-settings` top-level, `issues.exclude-rules`) to v2 layout (`linters.settings`, `linters.exclusions.rules`) per `golangci-lint config verify`.
+- **01.1-01:** Config + its justifying ADR ship in one atomic commit (`e823cf6`) — house-style: the why next to the what.
 
 ### Todos
 - (none captured yet)
@@ -88,7 +96,7 @@
 
 ## Session Continuity
 
-- **Last session:** 2026-06-18T14:53:43.457Z
-- **Stopped at:** Completed 01-specs-and-contracts/01-05-PLAN.md — Phase 1 complete
-- **Next action:** Write `.journal/M1.md` (PROC-02), then open PR to merge `feature/specs-and-contracts` → `main`. After merge, open `feature/foundations` branch off `main` and start Phase 2 (FOUND-01..FOUND-05).
-- **Resume hint:** Phase 1 closed with all 12 specs + ADR/RFC/journal/PR templates committed on `feature/specs-and-contracts` before any `feat:` commit (DOC-15 invariant satisfied). Plan 01-05 added GLOSSARY (DOC-09), CONTRIBUTING (DOC-10), RELEASE_PLAN (DOC-11), PROCESS (DOC-12), RFC 0001 (DOC-13 second half). Phase 2 starts with the in-memory `Log` type — likely first ADR-0001 will codify the single-mutex policy. RFC 0001 locks v1 scope: any later plan that wants to widen it must write a superseding RFC.
+- **Last session:** 2026-06-18T15:47:42.205Z
+- **Stopped at:** Completed 01.1-ci-bootstrap/01.1-01-PLAN.md — go module skeleton + .golangci.yml + ADR-0003 landed
+- **Next action:** Execute plan 01.1-02 (CI workflow `.github/workflows/ci.yml` with lint/test/commitlint/build jobs + ADR-0002 bringing CI forward).
+- **Resume hint:** On branch `feature/ci-bootstrap` (off `main`). Plan 01.1-01 landed `go.mod` (`go 1.25`), `doc.go` (stub), `.golangci.yml` (v2 schema, 7 linters), and `docs/adr/0003-golangci-lint-config.md`. Two commits: `3caf495` (chore go) and `e823cf6` (ci golangci-lint). `go test ./...` exits 0; `golangci-lint config verify` exits 0; `golangci-lint run` exits 0. Plan 02 will land the GitHub Actions workflow and ADR-0002; that workflow's `lint` job runs `config verify` per Pitfall 6, the `test` job exercises the `go.mod` skeleton landed here.

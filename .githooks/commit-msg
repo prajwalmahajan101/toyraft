@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# commit-msg: enforces Conventional Commits subject locally.
+# Install with: make hooks
+set -euo pipefail
+
+msg_file="$1"
+subject=$(head -1 "$msg_file")
+
+# Allow merge / fixup / revert auto-subjects from git itself
+case "$subject" in
+  "Merge "*|"Revert "*|"fixup! "*|"squash! "*) exit 0 ;;
+esac
+
+# Conventional Commits regex: type(scope)?!?: subject
+re='^(feat|fix|refactor|docs|test|chore|build|ci|perf|style|revert)(\([a-z0-9._-]+\))?!?: [^ ].{1,71}$'
+if ! [[ "$subject" =~ $re ]]; then
+  echo "commit-msg: subject does not match Conventional Commits format"
+  echo "  expected: <type>(<scope>)?: <subject>   (<=72 chars, no trailing period)"
+  echo "  got:      $subject"
+  exit 1
+fi
+# No trailing period
+if [[ "$subject" =~ \.$ ]]; then
+  echo "commit-msg: subject must not end with '.'"
+  exit 1
+fi
+exit 0
