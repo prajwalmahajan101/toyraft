@@ -16,7 +16,7 @@
 
 - **Phase:** 1 (Specs & Contracts) — Complete
 - **Plan:** 5/5 complete; ready to close Phase 1 with `.journal/M1.md` and merge `feature/specs-and-contracts`
-- **Status:** All 5 Phase 1 plans complete
+- **Status:** Milestone complete
 - **Branch:** `feature/specs-and-contracts`
 - **Progress:** [██████████] 100%
 - **Next phase:** Phase 2 — Foundations (`feature/foundations`), starts with FOUND-01..FOUND-05
@@ -66,6 +66,14 @@
 - **01-03:** Wire error sentinels are snake_case strings (`not_leader`, `stopped`, `proposal_dropped`, …) — append-only list; parsers tolerate unknown values.
 - **01-03:** No URL versioning. v2 uses additive JSON fields + new MessageType values; breaking changes (if any) get a new path chosen in an RFC.
 - **01-03:** `ErrSnapshotUnsupported` lives in `pkg/storage`, re-exported from `pkg/raft` for ergonomic consumer use.
+- **01-04:** Lock hierarchy is nominal (single mutex) but documented as state → log (in-state) → storage handle to forbid future fine-grained splits without an ADR superseding ADR-0001.
+- **01-04:** `applyCh` is unbuffered + sole-sender-closes-via-sync.Once after drain; `inboundCh` is NEVER closed (transport-close-first ordering prevents C-5 send-on-closed panic).
+- **01-04:** Hub's five chaos knobs (reorder/duplicate/drop/delay/partition) are public surface in `pkg/transport/inproc` so external consumers can author chaos tests against ToyRaft.
+- **01-04:** Failed seeds get committed as regression tests under `test/chaos/seeds/<test-name>.txt` — failed-once seeds run forever; matches CHAOS-07 "flake = P0 bug" policy.
+- **01-04:** Three required linearizability CI scenarios (steady-state / leader-churn / packet-loss) each across ≥3 seeds (LIN-04); scripted Figure 7 + Figure 8 always run (LIN-05).
+- **01-04:** SECURITY NOT-in-scope list is **closed**: any security feature not on it is also not in scope without an RFC.
+- **01-04:** Per-message-fsync vs cluster-durability composition documented in SECURITY (not just CONCURRENCY) — consumers MUST wait for `StateMachine.Apply` before acking writes (D-4 ToyMQ-integration contract).
+- **01-04:** Reverse-proxy + mTLS-terminator pattern noted as escape hatch but explicitly out of scope — proxy-induced bugs are not ToyRaft bugs.
 - **01-05:** RFC 0001 marked Accepted from creation — it IS the scope lock, not a proposal under discussion.
 - **01-05:** Library tags (`v<…>`) and demo binary tags (`toyraftd/v<…>`) partitioned by prefix so the Go module proxy does not cross-notify library consumers about binary releases.
 - **01-05:** RELEASE_PLAN documents `make <target>` plus direct `go` equivalents; Makefile itself lands Phase 14 but the surface is fixed now.
