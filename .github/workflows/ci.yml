@@ -1,0 +1,112 @@
+# ToyRaft CI — see docs/adr/0002-bring-ci-forward.md
+#
+# Four jobs: lint, test (matrix), commitlint, build (cross-compile).
+# Required-check names are enumerated verbatim in ADR-0002; branch protection
+# in plan 04 references those names. If you rename a job's `name:` field
+# below, update ADR-0002 in the same commit.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: golangci-lint config verify
+        # Defends Pitfall 6 (01.1-RESEARCH.md): on a near-empty tree
+        # `golangci-lint run` exits 0 even if `.golangci.yml` is garbled.
+        # `config verify` parses + validates the YAML without running
+        # linters, catching typos now instead of in Phase 2.
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+          golangci-lint config verify
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          # goinstall mode is REQUIRED for Go 1.26 source — the prebuilt
+          # binary ships compiled with Go 1.24 and cannot parse 1.26
+          # packages (Pitfall 1, sibling-verbatim invariant).
+          install-mode: goinstall
+          args: --timeout=5m
+
+  test:
+    name: test (${{ matrix.os }} / go ${{ matrix.go }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        go: ['1.25.x', '1.26.x']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          check-latest: true
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "gofmt would reformat:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race
+        run: go test -race -timeout 5m ./...
+
+  commitlint:
+    name: commitlint
+    # PR-only: push to main is post-merge, the gate already fired.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # wagoid walks the PR commit range; full history required so
+          # force-pushes + merge commits are handled correctly.
+          fetch-depth: 0
+
+      - uses: wagoid/commitlint-github-action@v6
+
+  build:
+    name: build (cross-compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: cross-compile matrix
+        # Single-runner env-var loop instead of strategy.matrix: cross-compile
+        # is a compile-only check; spinning four runners just to invoke the
+        # cross-compiler is wasteful. Justified in ADR-0002.
+        run: |
+          set -euo pipefail
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            GOOS=${target%/*} GOARCH=${target#*/} go build ./...
+          done
