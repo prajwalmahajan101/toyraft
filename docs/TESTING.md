@@ -257,6 +257,44 @@ the same histories.
 
 ## 6. Fuzz targets
 
+### Fuzz layer (Phase 2 onward — Log surface)
+
+Per RFC-0002, fuzz coverage on the in-memory `pkg/raft.Log` surface is
+pulled forward from Phase 11/12 to Phase 2 — bounded strictly to the
+six FOUND-02 methods (`Append`, `TruncateSuffix`, `Term`, `Match`,
+`LastIndex`, `LastTerm`). Multi-node fuzzing remains in Phase 11
+(chaos suite) and Phase 12 (linearizability).
+
+**What's fuzzed:** `pkg/raft/log_fuzz_test.go` declares
+`FuzzLogAppendTruncate` (property: `LastIndex` / `LastTerm`
+consistency under random valid `Append` + `TruncateSuffix` scripts)
+and `FuzzLogMatch` (property: `Match(idx, Term(idx))` holds for all
+in-range `idx`, fails for wrong-term and out-of-range).
+
+**What's NOT fuzzed at this layer:** anything reachable through
+`Storage`, `Transport`, `Node`, or multi-node interaction. Phase 9's
+`FuzzMessageParse` covers wire-format fuzzing; Phase 11/12 cover
+history-level fuzzing.
+
+**Local run:** Go's `-fuzz=` matches at most one function per
+invocation, so run each target separately:
+`go test -run=^$ -fuzz=^FuzzLogAppendTruncate$ -fuzztime=30s ./pkg/raft`
+and
+`go test -run=^$ -fuzz=^FuzzLogMatch$ -fuzztime=30s ./pkg/raft`.
+Default `go test ./pkg/raft` does NOT invoke the fuzzers (Go's
+`-fuzz` is opt-in); the corpus seeds under `pkg/raft/testdata/fuzz/`
+still run as regular table-test inputs on every `go test` invocation.
+
+**CI gating:** the workflow runs the two fuzz targets in series ONLY
+on `pull_request` events (`if: github.event_name ==
+'pull_request'` on the step). Pushes to `main` are exempt to keep
+main-branch CI fast. The step lives inside the existing `test` job —
+no new required-status-check name. Any newly-discovered crashing
+input is auto-saved by Go under `pkg/raft/testdata/fuzz/<FuzzName>/`
+and MUST be committed in the same PR as a regression artefact.
+
+### Long-running fuzz budget
+
 `go test -fuzz=Fuzz... -fuzztime=30s` runs clean on these targets in
 CI:
 

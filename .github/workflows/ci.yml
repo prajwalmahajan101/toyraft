@@ -81,6 +81,21 @@ jobs:
         # step from plan 02-06 which IS gated to pull_request only).
         run: go test -tags raftdebug -race -timeout 5m ./pkg/raft
 
+      - name: Fuzz (Log surface, PR only — RFC-0002)
+        # Per RFC-0002 + .planning/phases/02-foundations/02-06-PLAN.md: fuzz
+        # the *Log surface (FOUND-02 methods only) on PRs. Push-to-main is
+        # exempt to keep main CI fast; the gate already fired on the PR.
+        # Step lives INSIDE the existing `test` job so no new top-level
+        # required-status-check name is introduced (branch-protection
+        # contexts set live via `gh api PUT` in Phase 1.1 remain unchanged).
+        if: github.event_name == 'pull_request'
+        # Go's -fuzz= flag must match exactly one fuzz function per
+        # invocation; run each target in series. 30s per target is the
+        # RFC-0002 PR budget.
+        run: |
+          go test -run=^$ -fuzz=^FuzzLogAppendTruncate$ -fuzztime=30s ./pkg/raft
+          go test -run=^$ -fuzz=^FuzzLogMatch$ -fuzztime=30s ./pkg/raft
+
   commitlint:
     name: commitlint
     # PR-only: push to main is post-merge, the gate already fired.
