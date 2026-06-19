@@ -50,7 +50,10 @@ func FuzzLogAppendTruncate(f *testing.F) {
 				if expectedLast == 0 {
 					continue
 				}
-				from := Index(b%byte(expectedLast)) + 1 // 1..expectedLast
+				// Use Index arithmetic (not byte) so we don't divide by zero
+				// when expectedLast >= 256 truncates to byte(0). The script
+				// byte b provides entropy; expectedLast bounds the range.
+				from := Index(b)%expectedLast + 1 // 1..expectedLast
 				l.TruncateSuffix(from)
 				expectedLast = from - 1
 				if expectedLast == 0 {
