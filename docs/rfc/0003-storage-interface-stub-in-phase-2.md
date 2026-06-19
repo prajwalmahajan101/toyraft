@@ -1,6 +1,6 @@
 # RFC 0003 — Stub Storage Interface in Phase 2
 
-**Status:** Proposed
+**Status:** Accepted
 **Author:** project owner
 **Date:** 2026-06-20
 **Tracking issue:** N/A (executed under plan `02-07-PLAN.md`)
