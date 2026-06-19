@@ -1,6 +1,6 @@
 # RFC 0002 — Pull Log fuzz coverage forward to Phase 2
 
-**Status:** Proposed
+**Status:** Accepted
 **Author:** project owner
 **Date:** 2026-06-20
 **Tracking issue:** N/A (phase-2 internal RFC; tracked via
