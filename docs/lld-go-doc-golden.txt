@@ -1,0 +1,266 @@
+package raft // import "github.com/prajwalmahajan101/toyraft/pkg/raft"
+
+Package raft implements the ToyRaft consensus core.
+
+Zero-value convention: every exported type in this package is either useful
+at its zero value (e.g. Log{}, HardState{}, Role(0)=Follower) or, if a method
+cannot operate without construction, panics with a message of the form
+"raft.<Type>: zero-value <Type>; construct via raft.New". See docs/LLD.md Global
+Invariant 2.
+
+VARIABLES
+
+var ErrStorageNotImplemented = errors.New("raft/storage: not implemented in phase 2 (see RFC-0003)")
+    ErrStorageNotImplemented is returned by every method on the
+    Phase-2 not-yet-implemented Storage receiver declared at the
+    bottom of this file. Phase 3 replaces that receiver with a real
+    in-RAM impl in pkg/storage/memory; consumers of Storage that
+    depend on actual behaviour MUST NOT be wired up until then. See
+    docs/rfc/0003-storage-interface-stub-in-phase-2.md.
+
+    The sentinel is deliberately distinct from any I/O error: a caller that
+    observes ErrStorageNotImplemented has wired the Phase-2 not-yet-implemented
+    receiver by mistake, not encountered a runtime fault.
+
+
+TYPES
+
+type Entry struct {
+	Term  Term
+	Index Index
+	Data  []byte
+}
+    Entry is one replicated log record.
+
+    Invariants:
+      - Term is the term in which the leader created the entry.
+      - Index is 1-based and strictly increasing within a log.
+      - Data is opaque to Raft; the StateMachine defines its meaning.
+      - Once an Entry at (Term, Index) is committed, no other Entry with the
+        same Index may ever be committed (Log Matching, Raft §5.3).
+
+type HardState struct {
+	CurrentTerm Term
+	VotedFor    NodeID // empty when no vote cast in CurrentTerm
+	Commit      Index  // best-effort; may be stale after crash
+}
+    HardState is the durably-persisted slice of Raft state.
+
+    Invariants:
+      - Storage.SaveHardState MUST fsync before returning.
+      - A node MUST NOT emit any RPC that depends on a (Term, VotedFor) pair
+        until that pair is durable (REPL-09).
+      - Commit is persisted for fast restart but is also recoverable from the
+        log; loss of Commit on crash is safe but slower to converge.
+
+type Index uint64
+    Index is a 1-based position in the replicated log. Index 0 is reserved
+    for the implicit "before the first entry" sentinel used by AppendEntries
+    consistency checks.
+
+type Log struct {
+	// Has unexported fields.
+}
+    Log is the in-memory replicated log used by the Raft core.
+
+    Concurrency: Log is NOT safe for concurrent use. Callers (Node) hold Node.mu
+    (a single sync.Mutex) for every call — see docs/CONCURRENCY.md §2 and
+    docs/adr/0004-single-mutex-state-machine.md. Tests on *Log alone do NOT add
+    t.Parallel() with a shared receiver; that violates the ADR-0004 policy.
+
+    Index semantics: 1-based, contiguous, strictly increasing.
+      - LastIndex() == 0 means the log is empty (zero-value safe, FOUND-05).
+      - Term(0) returns (Term(0), nil) — the implicit pre-log sentinel used by
+        the AppendEntries consistency check (Raft §5.3 log-matching property).
+
+    Invariants enforced under -tags raftdebug (see log_assert_debug.go):
+     1. Append batch is contiguous: entries[i+1].Index == entries[i].Index+1
+     2. First entry continues the log: entries[0].Index == LastIndex()+1
+     3. Terms are non-decreasing within a batch and across appends
+     4. No entry has Term==0 (Term 0 is reserved for the empty-log sentinel)
+
+    Production builds elide these checks via build tags (zero runtime cost).
+
+func (l *Log) Append(entries ...Entry)
+    Append appends entries to the end of the log.
+
+    Empty / nil input is a no-op (zero-value-safe symmetry per FOUND-05). Under
+    -tags raftdebug, panics if the §4 invariants are violated. Under production
+    builds, silently appends; the caller is trusted to satisfy invariants (Node
+    holds Node.mu and computes the values from its own state).
+
+func (l *Log) LastIndex() Index
+    LastIndex returns the largest Index present, or 0 if the log is empty.
+
+func (l *Log) LastTerm() Term
+    LastTerm returns the Term of the last entry, or Term(0) if empty.
+
+func (l *Log) Match(prevIdx Index, prevTerm Term) bool
+    Match reports whether the log contains an entry at prevIdx with term
+    prevTerm. Returns true for (0, 0) — the pre-log sentinel base case used by
+    AppendEntries consistency checks (Raft §5.3).
+
+func (l *Log) Term(idx Index) (Term, error)
+    Term returns the term of the entry at idx, or Term(0) if idx == 0 (the
+    pre-log sentinel). For idx > LastIndex(), returns (0, error) where the error
+    wraps io.ErrUnexpectedEOF — matches LLD §3 LogStorage.Term contract.
+
+func (l *Log) TruncateSuffix(from Index)
+    TruncateSuffix discards entries with Index >= from.
+
+    Semantics:
+      - from == 0 truncates the entire log (legal; Phase 2 has no commitIndex
+        so no committed-prefix protection — that guard lives in Phase 6's AE
+        receiver per docs P0-3, NOT here).
+      - from > LastIndex() is a no-op.
+      - from == LastIndex()+1 is a no-op (idempotent).
+
+type LogStorage interface {
+	// Append persists entries in order. Entries are contiguous and start at
+	// LastIndex()+1.
+	//
+	// Invariants:
+	//   - MUST fsync the underlying storage before returning success (REPL-09).
+	//   - MUST NOT modify entries after return; caller may reuse the slice.
+	//   - On error, the on-disk state is unchanged (atomic per-call).
+	//
+	// Error contract:
+	//   - Wraps the underlying I/O error with %w.
+	Append(entries []Entry) error
+
+	// TruncateSuffix discards entries with index >= from. Used on log conflict.
+	//
+	// Invariants:
+	//   - MUST fsync before returning.
+	//   - No-op (returns nil) if from > LastIndex().
+	//
+	// Error contract:
+	//   - Wraps the underlying I/O error with %w.
+	TruncateSuffix(from Index) error
+
+	// Entries returns the half-open range [lo, hi).
+	//
+	// Invariants:
+	//   - Returned slice is freshly allocated; caller may mutate freely.
+	//
+	// Error contract:
+	//   - Returns an error wrapping io.ErrUnexpectedEOF if hi > LastIndex()+1.
+	//   - v2: returns ErrCompacted if lo is below the snapshot horizon.
+	Entries(lo, hi Index) ([]Entry, error)
+
+	// Term returns the term of the entry at index, or 0 if index == 0
+	// (the implicit pre-log sentinel).
+	//
+	// Error contract:
+	//   - Returns an error wrapping io.ErrUnexpectedEOF if index > LastIndex().
+	Term(index Index) (Term, error)
+
+	// FirstIndex returns the smallest index present in the log. 1 in v1
+	// (no compaction); v2 returns snapshotIndex+1.
+	FirstIndex() (Index, error)
+
+	// LastIndex returns the largest index present in the log, or 0 if the
+	// log is empty.
+	LastIndex() (Index, error)
+}
+    LogStorage persists the replicated log.
+
+type Message struct {
+	Type MessageType
+	Term Term
+	From NodeID
+	To   NodeID
+
+	// RequestVote / RequestVoteResponse
+	LastLogIndex Index // RequestVote: candidate's last log index
+	LastLogTerm  Term  // RequestVote: candidate's last log term
+	VoteGranted  bool  // RequestVoteResponse: vote outcome
+
+	// AppendEntries / AppendEntriesResponse
+	PrevLogIndex Index   // AE: index immediately preceding Entries
+	PrevLogTerm  Term    // AE: term of log[PrevLogIndex]
+	Entries      []Entry // AE: entries to append (empty for heartbeat)
+	LeaderCommit Index   // AE: leader's known commit index
+	Success      bool    // AE response: consistency-check outcome
+	MatchIndex   Index   // AE response: follower's last matching index
+
+	// Fast-rollback hints (Ongaro §5.3 optimisation)
+	ConflictTerm  Term  // AE response: term at the divergence point, or 0
+	ConflictIndex Index // AE response: first index with ConflictTerm, or
+
+}
+    Message is the on-the-wire and in-process Raft RPC envelope.
+
+    Invariants:
+      - Type, Term, From, To are always set (Tick excepted, which has only
+        Type).
+      - Receivers MUST treat Term > currentTerm as a step-down trigger BEFORE
+        inspecting any other field (Raft §5.1).
+      - The sender MUST NOT mutate a Message after handing it to Transport.Send;
+        transports may queue or fan-out asynchronously.
+      - Entries slices are shared by reference within a process; consumers MUST
+        copy before mutating.
+
+type MessageType uint8
+    MessageType discriminates Raft RPCs.
+
+    Wire-visible values 0..3 are frozen by docs/WIRE.md and append-only;
+    renumbering is a wire break.
+
+    Tick is internal-only — it drives the core state machine from the driver's
+    tick loop and MUST NOT appear on any Transport.Send call.
+
+const (
+	MsgRequestVote         MessageType = 0
+	MsgRequestVoteResponse MessageType = 1
+	MsgAppendEntries       MessageType = 2
+	MsgAppendEntriesResp   MessageType = 3
+
+	MsgTick MessageType = 255 // internal-only; not wire-visible
+)
+type NodeID string
+    NodeID is a stable, human-readable identifier for a cluster member. Must be
+    non-empty, unique across Config.Peers, and stable across restarts.
+
+type Role uint8
+    Role is a Raft server state.
+
+const (
+	Follower Role = iota
+	Candidate
+	Leader
+)
+type StateStorage interface {
+	// SaveHardState durably persists the given HardState.
+	//
+	// Invariants:
+	//   - MUST fsync before returning (REPL-09).
+	//   - MUST be atomic: a crash mid-call leaves either the prior or the new
+	//     HardState fully on disk, never a torn write.
+	//   - Implementations SHOULD use the tmp+rename pattern on Unix.
+	//
+	// Error contract:
+	//   - Wraps the underlying I/O error with %w.
+	SaveHardState(hs HardState) error
+
+	// LoadHardState returns the most recently persisted HardState, or the
+	// zero value if none has ever been saved (fresh node).
+	//
+	// Error contract:
+	//   - A missing file is NOT an error; returns (HardState{}, nil).
+	//   - A corrupt file IS an error; wraps the parse error with %w.
+	LoadHardState() (HardState, error)
+}
+    StateStorage persists HardState (the durable Raft state).
+
+type Storage interface {
+	LogStorage
+	StateStorage
+}
+    Storage composes log and hard-state persistence. Implementations live in
+    pkg/storage/memory and pkg/storage/file; consumers may write their own and
+    exercise pkg/storage/storagetest for conformance.
+
+type Term uint64
+    Term is Raft's monotonically increasing logical clock.
+

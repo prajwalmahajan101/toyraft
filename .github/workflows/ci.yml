@@ -81,6 +81,16 @@ jobs:
         # step from plan 02-06 which IS gated to pull_request only).
         run: go test -tags raftdebug -race -timeout 5m ./pkg/raft
 
+      - name: LLD drift check (SC6)
+        # Per .planning/phases/02-foundations/02-RESEARCH.md §8 Option B and
+        # plan 02-04: byte-for-byte diff of `go doc -all ./pkg/raft` against
+        # docs/lld-go-doc-golden.txt. Any divergence fails the build; the
+        # reviewer enforces that regenerated goldens land alongside the
+        # docs/LLD.md change in the same PR. Step lives INSIDE the existing
+        # `test` job so no new top-level required-status-check name is
+        # introduced (branch-protection contexts remain unchanged).
+        run: make lld-drift
+
       - name: Fuzz (Log surface, PR only — RFC-0002)
         # Per RFC-0002 + .planning/phases/02-foundations/02-06-PLAN.md: fuzz
         # the *Log surface (FOUND-02 methods only) on PRs. Push-to-main is
