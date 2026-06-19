@@ -60,8 +60,8 @@ goroutines).
 ## 2. Single-mutex policy
 
 One `sync.Mutex` named `mu` on the `Node` struct guards the entire
-core Raft state. Forward reference: this is **ADR-0001** (to be written
-in Phase 2 alongside the first implementation commit).
+core Raft state. Ratified by **ADR-0004** (single-mutex state machine
+policy).
 
 ### Rule
 
@@ -110,7 +110,7 @@ type Node struct {
   client proposal contends on `mu`. Acceptable for the toy-bar target
   (3-node demo, single-digit-thousands ops/sec); revisit only if
   benchmarks force the issue. The path to revisit is a new ADR that
-  supersedes ADR-0001, not silent sharding of the lock.
+  supersedes ADR-0004, not silent sharding of the lock.
 
 ### What `mu` does NOT guard
 
@@ -418,5 +418,5 @@ preventing rule above.
 - `docs/TESTING.md` — `goleak` baseline assertion, deterministic chaos
   contract that exploits the concurrency model.
 - `research/PITFALLS.md` §Concurrency — source for C-1..C-8.
-- Future ADR-0001 — single-mutex policy ratified.
+- ADR-0004 — single-mutex policy ratified.
 - Future ADR-0013 — shutdown via `context.Context`, not channel close.
