@@ -72,6 +72,15 @@ jobs:
       - name: go test -race
         run: go test -race -timeout 5m ./...
 
+      - name: Test (raftdebug build tag — invariant negative tests)
+        # Per ADR-0004 + .planning/phases/02-foundations/02-RESEARCH.md §6.3 /
+        # Q4: SC4 (Phase 2) requires debug-build invariant assertions; this
+        # step actually runs them so the scaffold is enforced by CI, not just
+        # documented. NO `if:` modifier — SC4 is a correctness gate and must
+        # run on BOTH push and pull_request events (contrast with the fuzz
+        # step from plan 02-06 which IS gated to pull_request only).
+        run: go test -tags raftdebug -race -timeout 5m ./pkg/raft
+
   commitlint:
     name: commitlint
     # PR-only: push to main is post-merge, the gate already fired.
