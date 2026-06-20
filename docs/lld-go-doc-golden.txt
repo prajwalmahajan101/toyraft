@@ -1,3 +1,4 @@
+=== go doc -all ./pkg/raft ===
 package raft // import "github.com/prajwalmahajan101/toyraft/pkg/raft"
 
 Package raft implements the ToyRaft consensus core.
@@ -10,17 +11,21 @@ Invariant 2.
 
 VARIABLES
 
-var ErrStorageNotImplemented = errors.New("raft/storage: not implemented in phase 2 (see RFC-0003)")
-    ErrStorageNotImplemented is returned by every method on the
-    Phase-2 not-yet-implemented Storage receiver declared at the
-    bottom of this file. Phase 3 replaces that receiver with a real
-    in-RAM impl in pkg/storage/memory; consumers of Storage that
-    depend on actual behaviour MUST NOT be wired up until then. See
-    docs/rfc/0003-storage-interface-stub-in-phase-2.md.
+var ErrSnapshotUnsupported = errors.New("raft: snapshot not supported in v1")
+    ErrSnapshotUnsupported is the v1 sentinel returned by every storage snapshot
+    stub and by StateMachine.Snapshot/Restore. v2 will populate snapshot
+    semantics without changing this sentinel (STOR-01 forward-compat; LLD §5
+    Global Invariant 5).
 
-    The sentinel is deliberately distinct from any I/O error: a caller that
-    observes ErrStorageNotImplemented has wired the Phase-2 not-yet-implemented
-    receiver by mistake, not encountered a runtime fault.
+    The value is declared in pkg/raft and re-exported by pkg/storage as
+    storage.ErrSnapshotUnsupported. This direction avoids the import cycle that
+    would arise if pkg/storage owned the sentinel (pkg/storage already imports
+    pkg/raft for raft.Entry / raft.HardState / raft.Index / raft.Term).
+
+    errors.Is and errors.Unwrap work transparently across the re-export because
+    both packages reference the same *errorString value.
+
+    See LLD §4 and ADR-0005.
 
 
 TYPES
@@ -115,56 +120,6 @@ func (l *Log) TruncateSuffix(from Index)
       - from > LastIndex() is a no-op.
       - from == LastIndex()+1 is a no-op (idempotent).
 
-type LogStorage interface {
-	// Append persists entries in order. Entries are contiguous and start at
-	// LastIndex()+1.
-	//
-	// Invariants:
-	//   - MUST fsync the underlying storage before returning success (REPL-09).
-	//   - MUST NOT modify entries after return; caller may reuse the slice.
-	//   - On error, the on-disk state is unchanged (atomic per-call).
-	//
-	// Error contract:
-	//   - Wraps the underlying I/O error with %w.
-	Append(entries []Entry) error
-
-	// TruncateSuffix discards entries with index >= from. Used on log conflict.
-	//
-	// Invariants:
-	//   - MUST fsync before returning.
-	//   - No-op (returns nil) if from > LastIndex().
-	//
-	// Error contract:
-	//   - Wraps the underlying I/O error with %w.
-	TruncateSuffix(from Index) error
-
-	// Entries returns the half-open range [lo, hi).
-	//
-	// Invariants:
-	//   - Returned slice is freshly allocated; caller may mutate freely.
-	//
-	// Error contract:
-	//   - Returns an error wrapping io.ErrUnexpectedEOF if hi > LastIndex()+1.
-	//   - v2: returns ErrCompacted if lo is below the snapshot horizon.
-	Entries(lo, hi Index) ([]Entry, error)
-
-	// Term returns the term of the entry at index, or 0 if index == 0
-	// (the implicit pre-log sentinel).
-	//
-	// Error contract:
-	//   - Returns an error wrapping io.ErrUnexpectedEOF if index > LastIndex().
-	Term(index Index) (Term, error)
-
-	// FirstIndex returns the smallest index present in the log. 1 in v1
-	// (no compaction); v2 returns snapshotIndex+1.
-	FirstIndex() (Index, error)
-
-	// LastIndex returns the largest index present in the log, or 0 if the
-	// log is empty.
-	LastIndex() (Index, error)
-}
-    LogStorage persists the replicated log.
-
 type Message struct {
 	Type MessageType
 	Term Term
@@ -230,6 +185,93 @@ const (
 	Candidate
 	Leader
 )
+type Term uint64
+    Term is Raft's monotonically increasing logical clock.
+
+
+=== go doc -all ./pkg/storage ===
+package storage // import "github.com/prajwalmahajan101/toyraft/pkg/storage"
+
+Package storage declares the Storage interface that pkg/raft consumes for log
+and hard-state persistence, plus the v1 ErrSnapshotUnsupported sentinel that
+storage snapshot stubs return.
+
+Implementations live in pkg/storage/memory (in-RAM, for tests and ephemeral
+clusters) and pkg/storage/file (append-only with fsynced HardState). Third-party
+implementors may exercise pkg/storage/storagetest for conformance.
+
+Source of truth: docs/LLD.md §3 (interface shape) and §4 (sentinel placement).
+See ADR-0005 for the Phase 3 freeze rationale.
+
+VARIABLES
+
+var ErrSnapshotUnsupported = raft.ErrSnapshotUnsupported
+    ErrSnapshotUnsupported is returned by every storage snapshot stub in v1.
+    v2 will populate Snapshot/Restore with real semantics without breaking the
+    v1 interface signatures (STOR-01 forward-compat; LLD §5 Global Invariant 5).
+
+    The sentinel's home is pkg/raft (raft.ErrSnapshotUnsupported); this is
+    a re-export so callers can write either storage.ErrSnapshotUnsupported
+    or raft.ErrSnapshotUnsupported and errors.Is resolves identically (both
+    reference the same *errorString value).
+
+    Direction rationale: pkg/storage already imports pkg/raft for raft.Entry
+    / raft.HardState / raft.Index / raft.Term, so the sentinel must live in
+    pkg/raft to avoid an import cycle. See ADR-0005.
+
+
+TYPES
+
+type LogStorage interface {
+	// Append persists entries in order. Entries are contiguous and start at
+	// LastIndex()+1.
+	//
+	// Invariants:
+	//   - MUST fsync the underlying storage before returning success (REPL-09).
+	//   - MUST NOT modify entries after return; caller may reuse the slice.
+	//   - On error, the on-disk state is unchanged (atomic per-call).
+	//
+	// Error contract:
+	//   - Wraps the underlying I/O error with %w.
+	Append(entries []raft.Entry) error
+
+	// TruncateSuffix discards entries with index >= from. Used on log conflict.
+	//
+	// Invariants:
+	//   - MUST fsync before returning.
+	//   - No-op (returns nil) if from > LastIndex().
+	//
+	// Error contract:
+	//   - Wraps the underlying I/O error with %w.
+	TruncateSuffix(from raft.Index) error
+
+	// Entries returns the half-open range [lo, hi).
+	//
+	// Invariants:
+	//   - Returned slice is freshly allocated; caller may mutate freely.
+	//
+	// Error contract:
+	//   - Returns an error wrapping io.ErrUnexpectedEOF if hi > LastIndex()+1.
+	//   - v2: returns ErrCompacted if lo is below the snapshot horizon.
+	Entries(lo, hi raft.Index) ([]raft.Entry, error)
+
+	// Term returns the term of the entry at index, or 0 if index == 0
+	// (the implicit pre-log sentinel).
+	//
+	// Error contract:
+	//   - Returns an error wrapping io.ErrUnexpectedEOF if index > LastIndex().
+	Term(index raft.Index) (raft.Term, error)
+
+	// FirstIndex returns the smallest index present in the log. 1 in v1
+	// (no compaction); v2 returns snapshotIndex+1.
+	FirstIndex() (raft.Index, error)
+
+	// LastIndex returns the largest index present in the log, or 0 if the
+	// log is empty.
+	LastIndex() (raft.Index, error)
+}
+    LogStorage persists the replicated log.
+
 type StateStorage interface {
 	// SaveHardState durably persists the given HardState.
 	//
@@ -241,17 +283,31 @@ type StateStorage interface {
 	//
 	// Error contract:
 	//   - Wraps the underlying I/O error with %w.
-	SaveHardState(hs HardState) error
+	SaveHardState(hs raft.HardState) error
 
 	// LoadHardState returns the most recently persisted HardState, or the
 	// zero value if none has ever been saved (fresh node).
 	//
 	// Error contract:
-	//   - A missing file is NOT an error; returns (HardState{}, nil).
+	//   - A missing file is NOT an error; returns (raft.HardState{}, nil).
 	//   - A corrupt file IS an error; wraps the parse error with %w.
-	LoadHardState() (HardState, error)
+	LoadHardState() (raft.HardState, error)
+
+	// Snapshot serialises the persisted state up to lastIndex.
+	//
+	// v1: implementors MUST return (nil, 0, ErrSnapshotUnsupported). v2:
+	// will define snapshot semantics; this signature is forward-compatible
+	// (STOR-01; LLD §5 Global Invariant 5).
+	Snapshot() (data []byte, lastIndex raft.Index, err error)
+
+	// Restore replaces the persisted state from a snapshot produced by
+	// Snapshot.
+	//
+	// v1: implementors MUST return ErrSnapshotUnsupported.
+	Restore(data []byte) error
 }
-    StateStorage persists HardState (the durable Raft state).
+    StateStorage persists HardState (the durable Raft state) and exposes the v1
+    snapshot stubs.
 
 type Storage interface {
 	LogStorage
@@ -261,6 +317,63 @@ type Storage interface {
     pkg/storage/memory and pkg/storage/file; consumers may write their own and
     exercise pkg/storage/storagetest for conformance.
 
-type Term uint64
-    Term is Raft's monotonically increasing logical clock.
+
+=== go doc -all ./pkg/storage/storagetest ===
+package storagetest // import "github.com/prajwalmahajan101/toyraft/pkg/storage/storagetest"
+
+Package storagetest provides a reusable conformance harness that verifies a
+storage.Storage implementation satisfies the LLD §3 contract.
+
+Usage from an impl's _test.go file:
+
+    func TestConformance(t *testing.T) {
+        storagetest.RunConformance(t, func(t *testing.T) storage.Storage {
+            return mystorage.New()
+        })
+    }
+
+Each conformance sub-test calls the factory to obtain a FRESH storage.Storage
+— sub-tests share no state. A single failing invariant fails one sub-test,
+not the whole suite.
+
+This package is intentionally public (not under internal/) per ROADMAP Phase 3
+SC3: third-party Storage implementors are expected to run this harness against
+their own impls.
+
+Adding a new invariant: append a t.Run block inside RunConformance and document
+the LLD §3 contract line it covers. Removing an invariant requires an RFC — the
+public API includes the set of invariants the harness enforces.
+
+FUNCTIONS
+
+func RunConformance(t *testing.T, f Factory)
+    RunConformance executes the full LLD §3 invariant suite against the Storage
+    returned by f. Each invariant is a t.Run sub-test, so a single failure does
+    not cascade.
+
+    Coverage (one t.Run per invariant; names map to LLD §3 contract lines):
+
+      - Empty — zero-value getter contract
+      - AppendMonotonic — contiguous append, LastIndex/Term advance
+      - AppendNonContiguousRejected — gap-after-empty is an error
+      - TruncateSuffixTail — TruncateSuffix(from) drops [from, last]
+      - TruncateSuffixNoopAboveLast — TruncateSuffix above LastIndex is a no-op
+      - EntriesHalfOpen — Entries(lo, hi) is half-open [lo, hi)
+      - EntriesOutOfRange — hi > LastIndex+1 wraps io.ErrUnexpectedEOF
+      - TermOutOfRange — Term(idx) above LastIndex wraps io.ErrUnexpectedEOF
+      - HardStateRoundtrip — SaveHardState/LoadHardState preserve all fields
+      - HardStateFreshIsZero — LoadHardState on fresh store returns (zero, nil)
+      - SnapshotStub — Snapshot returns (nil, 0, ErrSnapshotUnsupported)
+      - RestoreStub — Restore returns ErrSnapshotUnsupported
+      - EntriesCallerCanMutate — mutating Entries' return does not corrupt store
+      - AppendCallerCanMutate — mutating Append's input after return does not
+        corrupt store
+
+
+TYPES
+
+type Factory func(t *testing.T) storage.Storage
+    Factory produces a fresh, empty storage.Storage for each conformance
+    sub-test. Implementations MUST return a NEW Storage value on every call;
+    sub-tests share no state.
 
