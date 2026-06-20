@@ -12,5 +12,14 @@ lld-drift:
 	@bash scripts/check-lld-drift.sh
 
 lld-drift-update:
-	@go doc -all ./pkg/raft > docs/lld-go-doc-golden.txt
+	@{ \
+		echo "=== go doc -all ./pkg/raft ==="; \
+		go doc -all ./pkg/raft; \
+		echo ""; \
+		echo "=== go doc -all ./pkg/storage ==="; \
+		go doc -all ./pkg/storage; \
+		echo ""; \
+		echo "=== go doc -all ./pkg/storage/storagetest ==="; \
+		go doc -all ./pkg/storage/storagetest; \
+	} > docs/lld-go-doc-golden.txt
 	@echo "Regenerated docs/lld-go-doc-golden.txt — review the diff and commit alongside docs/LLD.md."
