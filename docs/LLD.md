@@ -335,6 +335,9 @@ type StateMachine interface {
 // Storage composes log and hard-state persistence. Implementations live in
 // pkg/storage/memory and pkg/storage/file; consumers may write their own
 // and exercise pkg/storage/storagetest for conformance.
+//
+// The Storage interface and its constituents live in pkg/storage (Phase 3
+// freeze; see ADR-0005).
 type Storage interface {
     LogStorage
     StateStorage
@@ -390,7 +393,8 @@ type LogStorage interface {
     LastIndex() (Index, error)
 }
 
-// StateStorage persists HardState (the durable Raft state).
+// StateStorage persists HardState (the durable Raft state) and exposes the
+// v1 snapshot stubs.
 type StateStorage interface {
     // SaveHardState durably persists the given HardState.
     //
@@ -411,6 +415,19 @@ type StateStorage interface {
     //   - A missing file is NOT an error; returns (HardState{}, nil).
     //   - A corrupt file IS an error; wraps the parse error with %w.
     LoadHardState() (HardState, error)
+
+    // Snapshot serialises the persisted state up to lastIndex.
+    //
+    // v1: implementors MUST return (nil, 0, ErrSnapshotUnsupported).
+    // v2: will define snapshot semantics; this signature is forward-compatible
+    // (STOR-01; Global Invariant 5). See ADR-0005.
+    Snapshot() (data []byte, lastIndex Index, err error)
+
+    // Restore replaces the persisted state from a snapshot produced by
+    // Snapshot.
+    //
+    // v1: implementors MUST return ErrSnapshotUnsupported.
+    Restore(data []byte) error
 }
 ```
 
@@ -512,7 +529,7 @@ var (
 )
 ```
 
-`ErrSnapshotUnsupported` lives in `pkg/storage` (for re-use by `Storage` impls' snapshot stubs) and is re-exported from `pkg/raft` for convenience.
+`ErrSnapshotUnsupported` lives in `pkg/raft` and is re-exported from `pkg/storage` as `storage.ErrSnapshotUnsupported`. Direction is forced by import-cycle avoidance: `pkg/storage` already imports `pkg/raft` for `Entry`/`HardState`/`Index`/`Term`, so the sentinel cannot live in `pkg/storage`. `errors.Is` resolves identically against either name. See ADR-0005.
 
 ---
 
