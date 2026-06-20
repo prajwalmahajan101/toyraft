@@ -12,8 +12,6 @@
 package storage
 
 import (
-	"errors"
-
 	"github.com/prajwalmahajan101/toyraft/pkg/raft"
 )
 
@@ -22,10 +20,15 @@ import (
 // breaking the v1 interface signatures (STOR-01 forward-compat;
 // LLD §5 Global Invariant 5).
 //
-// pkg/raft re-exports this sentinel as raft.ErrSnapshotUnsupported for
-// caller convenience; errors.Is and errors.Unwrap work transparently
-// across the re-export because both sides reference the same value.
-var ErrSnapshotUnsupported = errors.New("raft: snapshot not supported in v1")
+// The sentinel's home is pkg/raft (raft.ErrSnapshotUnsupported); this
+// is a re-export so callers can write either storage.ErrSnapshotUnsupported
+// or raft.ErrSnapshotUnsupported and errors.Is resolves identically
+// (both reference the same *errorString value).
+//
+// Direction rationale: pkg/storage already imports pkg/raft for
+// raft.Entry / raft.HardState / raft.Index / raft.Term, so the sentinel
+// must live in pkg/raft to avoid an import cycle. See ADR-0005.
+var ErrSnapshotUnsupported = raft.ErrSnapshotUnsupported
 
 // Storage composes log and hard-state persistence. Implementations live in
 // pkg/storage/memory and pkg/storage/file; consumers may write their own
