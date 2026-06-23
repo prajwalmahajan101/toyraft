@@ -34,7 +34,6 @@ type node struct {
 	role          Role
 	log           *Log
 	commitIndex   Index
-	lastApplied   Index
 	leaderHint    NodeID
 	lastHeartbeat int // tick counter, never time.Time (C-6 / C-7)
 

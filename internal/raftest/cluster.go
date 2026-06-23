@@ -15,7 +15,7 @@ import (
 )
 
 // Cluster is the N-node test fixture. Plan 05-05 swaps the Phase-4
-// noopNode for raftNodeAdapter, which wraps a real *raft.TestNode and
+// noopNode for RaftNodeAdapter, which wraps a real *raft.TestNode and
 // runs the canonical Step -> Recv -> Step -> Ready -> SaveHardState ->
 // RecordSend -> Send driver loop per Tick (RESEARCH Pattern 3 / Plan
 // 05-05). The harness fields (T, N, Seed, Clock, Hub, Recorder) keep
@@ -31,12 +31,12 @@ type Cluster struct {
 
 	endpoints []*inproc.Endpoint // one per node, indexed 0..N-1
 	nodeIDs   []raft.NodeID      // sorted; nodeIDs[i] is the ID for index i
-	nodes     []*raftNodeAdapter // real-node adapters; Phase 5 driver
+	nodes     []*RaftNodeAdapter // real-node adapters; Phase 5 driver
 	ctx       context.Context    // used for Endpoint.Send and shutdown
 	cancel    context.CancelFunc
 }
 
-// raftNodeAdapter wraps a *raft.TestNode plus the per-node IO
+// RaftNodeAdapter wraps a *raft.TestNode plus the per-node IO
 // substrate (OrderingStorage + inproc.Endpoint). The adapter exists
 // only inside internal/raftest — Phase 7 lands the canonical
 // pkg/raft/driver.go which retires this type and the tickOnce loop
@@ -45,7 +45,7 @@ type Cluster struct {
 // Field layout mirrors the canonical Step/Ready event-loop driver: one
 // node, one storage wrapper (so SC5 ordering is recorded), one Hub
 // endpoint (so Send is bound to this node's identity).
-type raftNodeAdapter struct {
+type RaftNodeAdapter struct {
 	id       raft.NodeID
 	node     *raft.TestNode
 	storage  *OrderingStorage
@@ -56,11 +56,11 @@ type raftNodeAdapter struct {
 // a Step directly (e.g. TestStepDownHaltsInFlight forcing a higher-
 // term AppendEntries) reach the node through this accessor rather
 // than the IO loop in Cluster.tickOnce.
-func (a *raftNodeAdapter) Node() *raft.TestNode { return a.node }
+func (a *RaftNodeAdapter) Node() *raft.TestNode { return a.node }
 
 // Storage exposes the OrderingStorage wrapper for tests that want to
 // run the SC5 precedence assertion at end-of-test.
-func (a *raftNodeAdapter) Storage() *OrderingStorage { return a.storage }
+func (a *RaftNodeAdapter) Storage() *OrderingStorage { return a.storage }
 
 // NewCluster builds an N-node cluster on a shared FakeClock + Hub at
 // the given seed. N must be odd and >= 3 (Raft quorum requirement).
@@ -101,7 +101,7 @@ func NewCluster(t testing.TB, n int, seed int64) *Cluster {
 		Recorder:  rec,
 		nodeIDs:   make([]raft.NodeID, n),
 		endpoints: make([]*inproc.Endpoint, n),
-		nodes:     make([]*raftNodeAdapter, n),
+		nodes:     make([]*RaftNodeAdapter, n),
 		ctx:       ctx,
 		cancel:    cancel,
 	}
@@ -134,7 +134,7 @@ func NewCluster(t testing.TB, n int, seed int64) *Cluster {
 		if err != nil {
 			t.Fatalf("raftest: NewTestNode[%d] (%s): %v", i, c.nodeIDs[i], err)
 		}
-		c.nodes[i] = &raftNodeAdapter{
+		c.nodes[i] = &RaftNodeAdapter{
 			id:       c.nodeIDs[i],
 			node:     node,
 			storage:  ord,
@@ -185,7 +185,7 @@ func (c *Cluster) Tick(d time.Duration) {
 // design (chaos layer); a dropped Send is correct behaviour and must
 // not abort the test. Step errors that are not ErrStopped DO fatal
 // (validation drift would otherwise hide).
-func (c *Cluster) tickOnce(a *raftNodeAdapter) {
+func (c *Cluster) tickOnce(a *RaftNodeAdapter) {
 	// 1. MsgTick.
 	if err := a.node.Step(raft.Message{Type: raft.MsgTick}); err != nil {
 		if !errors.Is(err, raft.ErrStopped) {
@@ -283,7 +283,7 @@ func (c *Cluster) Leader() (raft.NodeID, raft.Term) {
 // NodeByID returns the adapter for id, or nil if no such node. Used
 // by integration tests that need direct Step/Ready access on a
 // specific node (TestStepDownHaltsInFlight).
-func (c *Cluster) NodeByID(id raft.NodeID) *raftNodeAdapter {
+func (c *Cluster) NodeByID(id raft.NodeID) *RaftNodeAdapter {
 	for _, a := range c.nodes {
 		if a.id == id {
 			return a
