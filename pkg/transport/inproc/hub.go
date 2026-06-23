@@ -144,14 +144,6 @@ func (h *Hub) nextSeq() uint64 {
 	return h.seq
 }
 
-// dispatch is the single delivery goroutine. The full loop body lands
-// in plan 04-03 Task 2 (dispatcher.go). This Task-1 stub exists only so
-// NewHub can launch + Close can join; FIFO delivery is not yet wired.
-func (h *Hub) dispatch() {
-	defer h.wg.Done()
-	<-h.ctx.Done()
-}
-
 // send enqueues a message for delivery. FIFO semantics in plan 04-03:
 // deliverAt is the current clock instant with no added delay. Plan
 // 04-04 inserts the chaos decision layer between Connect/Endpoint and
