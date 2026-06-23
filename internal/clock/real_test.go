@@ -81,7 +81,7 @@ func TestReal_NewTicker_FiresPeriodically(t *testing.T) {
 	defer tk.Stop()
 
 	deadline := time.After(500 * time.Millisecond)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		select {
 		case <-tk.C():
 			// ok
