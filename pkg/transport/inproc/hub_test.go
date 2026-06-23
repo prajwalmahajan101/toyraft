@@ -92,13 +92,11 @@ func TestHub_CloseIsIdempotent(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 5 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if err := h.Close(); err != nil {
 				t.Errorf("Close returned %v; want nil", err)
 			}
-		}()
+		})
 	}
 
 	finished := make(chan struct{})
