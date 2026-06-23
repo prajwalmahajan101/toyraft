@@ -333,6 +333,9 @@ func (c *Cluster) Close() {
 // only ensures the dispatcher has had a chance to run before the
 // per-node drain in tickOnce inspects the inbound channel.
 //
-// Sized to match pkg/transport/inproc/chaos_test.go's quiesce (20ms);
-// tests in this package depend on the same scheduling assumption.
-func quiesce() { time.Sleep(20 * time.Millisecond) }
+// Sized to give the dispatcher goroutine reliable scheduling slack
+// without dominating chaos-suite wall-clock budgets — 2ms is enough
+// for runtime.Gosched plus a couple of channel hops on commodity
+// hardware, and 100×200×2×2ms ≈ 80s of nominal wait time which the
+// Go test parallel runner amortises across cores.
+func quiesce() { time.Sleep(2 * time.Millisecond) }
