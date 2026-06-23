@@ -1,7 +1,7 @@
 # ToyRaft Makefile
 # More targets land in later phases (build, test, demo) — see ROADMAP.md.
 
-.PHONY: hooks lld-drift lld-drift-update
+.PHONY: hooks lld-drift lld-drift-update check-no-time-now verify
 
 hooks:
 	@chmod +x .githooks/*
@@ -10,6 +10,16 @@ hooks:
 
 lld-drift:
 	@bash scripts/check-lld-drift.sh
+
+# check-no-time-now bans direct time.Now() outside the sanctioned
+# internal/clock/real.go entry point. See ADR-0006 + ADR-0007.
+check-no-time-now:
+	@bash scripts/check-no-time-now.sh
+
+# verify is the umbrella lint target. Plan 04-04 wired
+# check-no-time-now in alongside the existing lld-drift gate; later
+# phases append further checks here.
+verify: lld-drift check-no-time-now
 
 lld-drift-update:
 	@{ \
