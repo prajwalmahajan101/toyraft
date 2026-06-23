@@ -183,11 +183,27 @@ type Config struct {
     ElectionTimeoutMax time.Duration // e.g. 300ms
     HeartbeatInterval  time.Duration // e.g.  50ms
 
+    // Clock is the time source. nil is replaced by clock.NewReal during
+    // applyDefaults; tests supply clock.NewFake for determinism (ADR-0006).
+    // All wall-clock access inside pkg/raft routes through this Clock and is
+    // enforced by scripts/check-no-time-now.sh — added Phase 5 plan 05-02
+    // alongside ADR-0009 (per-node RNG mixing) so the RNG zero-seed fallback
+    // can draw entropy from clk.Now() rather than time.Now().
+    Clock clock.Clock
+
     Logger      *slog.Logger
     Seed        int64
     StopTimeout time.Duration // upper bound on Stop() drain; default 5s
 }
 ```
+
+> **Phase 5 back-patch (2026-06-23).** The `Config.Clock clock.Clock` field
+> above was added during plan 05-02 (commit `5caf96a`, fix for the RNG
+> fallback entropy path so no `time.Now()` call leaks into `pkg/raft`).
+> The exported sentinel `ErrInvalidConfig` (returned by `Config.Validate`,
+> wrapping a per-field cause with `%w`) and `ErrStopped` (returned by
+> `node.Step` before the start sequence completes) were also added in
+> plan 05-01; both appear in the LLD-drift golden as of phase close.
 
 ### Status
 
@@ -330,6 +346,29 @@ type StateMachine interface {
 ```
 
 ### Storage (LogStorage + StateStorage)
+
+> **Phase 5 back-patch (2026-06-23).** Plan 05-01 introduced a **local**
+> `Storage` interface declared inside `pkg/raft` (the minimal subset
+> `LoadHardState` / `SaveHardState` / log accessors actually consumed by the
+> state machine) to defeat the `pkg/raft <-> pkg/storage` import cycle —
+> `pkg/storage` already imports `pkg/raft` for the `Entry` / `HardState` /
+> `Index` / `Term` types per ADR-0005, so `pkg/raft` cannot import the
+> canonical `pkg/storage.Storage` directly. `pkg/storage.Storage`
+> structurally satisfies the local interface, so consumer code is
+> unchanged. **Phase 7 will reconcile this via an ADR**: either (a) move
+> the shared Raft types to a leaf package both can import, or (b) declare
+> the local subset interface as the canonical Raft-side view and document
+> the duplication explicitly. Until then, the duplication is a known
+> deviation tracked in `.journal/M5.md`.
+>
+> Plan 05-04 also added `func (n *node) Ready() ([]Message, *HardState)`
+> on the internal node type as the canonical drain seam (ADR-0008); the
+> exported `Node` interface in §3 does **not** yet carry `Ready` because
+> the public `raft.Node` / `raft.New` constructors do not land until
+> Phase 7. The `raft.TestNode` exported test handle (`pkg/raft/test_helpers.go`)
+> wraps `*node` and surfaces `Ready`, `RoleAndTerm`, and `ID` for
+> integration tests in `internal/raftest`; it will be deleted in Phase 7
+> when the proper `raft.New` constructor lands.
 
 ```go
 // Storage composes log and hard-state persistence. Implementations live in
