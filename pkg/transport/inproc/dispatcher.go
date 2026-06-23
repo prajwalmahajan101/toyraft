@@ -5,6 +5,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/prajwalmahajan101/toyraft/internal/clock"
 	"github.com/prajwalmahajan101/toyraft/pkg/raft"
 )
 
@@ -92,7 +93,11 @@ func (h *Hub) drainDueLocked(now time.Time) []*pending {
 
 // dispatch runs on a single goroutine started by NewHub. The loop:
 //
-//  1. Block on wake OR h.ctx.Done.
+//  1. Wait on (wake, h.ctx.Done, or h.clk.After(timeUntilNext)) — the
+//     After branch makes FakeClock.Advance synchronously wake the
+//     dispatcher when a delayed message becomes due, which is the
+//     mechanism plan 04-04 chaos tests rely on for delay / reorder /
+//     duplicate determinism.
 //  2. Drain every due pending under h.mu via drainDueLocked.
 //  3. When chaos.reorderOn is set, bucket the due batch per receiver
 //     (walking h.sortedNodes for deterministic iteration order — never
@@ -107,11 +112,56 @@ func (h *Hub) drainDueLocked(now time.Time) []*pending {
 // (RESEARCH Pattern 2, Pitfall 4).
 func (h *Hub) dispatch() {
 	defer h.wg.Done()
+	// A single reusable Timer is allocated lazily on the first loop
+	// iteration that needs to park on a future deliverAt. Reusing it
+	// (Stop + Reset) avoids leaking a fakeTimer into FakeClock's heap
+	// on every iteration.
+	var nextTimer clock.Timer
+	stopTimer := func() {
+		if nextTimer != nil {
+			nextTimer.Stop()
+		}
+	}
+	defer stopTimer()
 	for {
+		// Compute time until next due message under h.mu, then arm
+		// nextTimer and select on (wake | ctx.Done | nextTimer.C).
+		// When the heap is empty we park on wake / ctx.Done alone.
+		h.mu.Lock()
+		var armCh <-chan time.Time
+		if h.queue.Len() > 0 {
+			top := (*h.queue)[0]
+			d := top.deliverAt.Sub(h.clk.Now())
+			if d < 0 {
+				d = 0
+			}
+			h.mu.Unlock()
+			if nextTimer == nil {
+				nextTimer = h.clk.NewTimer(d)
+			} else {
+				// Stop + drain the channel before Reset so an
+				// already-fired stale value cannot race the new
+				// arming. Standard time.Timer reset pattern.
+				if !nextTimer.Stop() {
+					select {
+					case <-nextTimer.C():
+					default:
+					}
+				}
+				nextTimer.Reset(d)
+			}
+			armCh = nextTimer.C()
+		} else {
+			h.mu.Unlock()
+		}
 		select {
 		case <-h.ctx.Done():
 			return
 		case <-h.wake:
+			if nextTimer != nil {
+				nextTimer.Stop()
+			}
+		case <-armCh:
 		}
 		for {
 			h.mu.Lock()
@@ -159,22 +209,39 @@ func (h *Hub) dispatch() {
 //
 // Caller holds h.mu so the RNG draw is deterministic.
 func (h *Hub) orderLocked(due []*pending) []*pending {
-	if !h.chaos.reorderOn || len(due) < 2 {
+	if !h.chaos.reorderOn || len(due) < 2 || h.chaos.reorderQD < 2 {
+		// queueDepth < 2 degenerates to FIFO by construction — a
+		// one-element shuffle window has nothing to permute
+		// (RESEARCH Pitfall 6, ADR-0007).
 		return due
 	}
+	qd := h.chaos.reorderQD
 	byTo := make(map[raft.NodeID][]*pending, len(due))
 	for _, p := range due {
 		byTo[p.to] = append(byTo[p.to], p)
 	}
 	out := due[:0]
-	for _, to := range h.sortedNodes {
-		bucket := byTo[to]
-		if len(bucket) > 1 {
-			h.chaos.reorderRNG.Shuffle(len(bucket), func(i, j int) {
-				bucket[i], bucket[j] = bucket[j], bucket[i]
-			})
+	emit := func(bucket []*pending) {
+		// Walk the bucket in qd-sized chunks; shuffle each chunk
+		// independently. With qd>=len(bucket) this is a single
+		// shuffle of the whole bucket; with qd<len(bucket) the
+		// dispatcher emits qd-sized permuted windows in order.
+		for start := 0; start < len(bucket); start += qd {
+			end := start + qd
+			if end > len(bucket) {
+				end = len(bucket)
+			}
+			chunk := bucket[start:end]
+			if len(chunk) > 1 {
+				h.chaos.reorderRNG.Shuffle(len(chunk), func(i, j int) {
+					chunk[i], chunk[j] = chunk[j], chunk[i]
+				})
+			}
+			out = append(out, chunk...)
 		}
-		out = append(out, bucket...)
+	}
+	for _, to := range h.sortedNodes {
+		emit(byTo[to])
 		delete(byTo, to)
 	}
 	// Any receiver not in sortedNodes (should not happen — Send only
@@ -187,7 +254,7 @@ func (h *Hub) orderLocked(due []*pending) []*pending {
 		}
 		sort.Slice(remainder, func(i, j int) bool { return remainder[i] < remainder[j] })
 		for _, to := range remainder {
-			out = append(out, byTo[to]...)
+			emit(byTo[to])
 		}
 	}
 	return out
