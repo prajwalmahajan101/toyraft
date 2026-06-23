@@ -38,6 +38,11 @@ type Hub struct {
 	// dispatcher when it parks the heap empty. Non-blocking writers,
 	// single reader (the dispatcher).
 	wake chan struct{}
+
+	// chaos owns the split-seed sub-RNGs and per-knob state for the
+	// LLD §6 chaos surface (Partition / Heal / DropRate / Delay /
+	// Reorder / Duplicate). All reads + writes happen under h.mu.
+	chaos *chaos
 }
 
 // nodeState owns a single connected node's inbound channel.
@@ -77,6 +82,7 @@ func NewHub(cfg HubConfig) (*Hub, error) {
 		nodes:  make(map[raft.NodeID]*nodeState),
 		queue:  &pendingHeap{},
 		wake:   make(chan struct{}, 1),
+		chaos:  newChaos(cfg.Seed),
 	}
 
 	h.wg.Add(1)
@@ -144,20 +150,41 @@ func (h *Hub) nextSeq() uint64 {
 	return h.seq
 }
 
-// send enqueues a message for delivery. FIFO semantics in plan 04-03:
-// deliverAt is the current clock instant with no added delay. Plan
-// 04-04 inserts the chaos decision layer between Connect/Endpoint and
-// this method.
+// send enqueues a message for delivery, consulting the chaos layer
+// first: partitioned or dropped messages are silently discarded; the
+// surviving message receives a per-Send delay (delivered at
+// clk.Now()+delay); if the dup decision fires a second copy is enqueued
+// one nanosecond later so the dispatcher's (deliverAt, seq) total order
+// is preserved.
 func (h *Hub) send(_ context.Context, from raft.NodeID, msg raft.Message) error {
 	h.mu.Lock()
-	p := &pending{
-		deliverAt: h.clk.Now(),
+	if h.chaos.isPartitioned(from, msg.To) {
+		h.mu.Unlock()
+		return nil
+	}
+	if h.chaos.dropDecision(from) {
+		h.mu.Unlock()
+		return nil
+	}
+	delay := h.chaos.sampleDelay()
+	dup := h.chaos.dupDecision()
+	deliverAt := h.clk.Now().Add(delay)
+	h.push(&pending{
+		deliverAt: deliverAt,
 		seq:       h.nextSeq(),
 		from:      from,
 		to:        msg.To,
 		msg:       msg,
+	})
+	if dup {
+		h.push(&pending{
+			deliverAt: deliverAt.Add(time.Nanosecond),
+			seq:       h.nextSeq(),
+			from:      from,
+			to:        msg.To,
+			msg:       msg,
+		})
 	}
-	h.push(p)
 	h.mu.Unlock()
 
 	// Non-blocking wake. wake is 1-buffered; if a notification is
@@ -168,6 +195,65 @@ func (h *Hub) send(_ context.Context, from raft.NodeID, msg raft.Message) error 
 	default:
 	}
 	return nil
+}
+
+// Partition installs a symmetric cut between a and b: both (a -> b)
+// and (b -> a) are dropped silently from Send. Asymmetric partitions
+// are out of scope for v1 (RESEARCH Pitfall 7, ADR-0007).
+func (h *Hub) Partition(a, b raft.NodeID) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.chaos.partitions[partitionKey{A: a, B: b}] = struct{}{}
+	h.chaos.partitions[partitionKey{A: b, B: a}] = struct{}{}
+}
+
+// Heal removes the symmetric cut installed by Partition. Idempotent.
+func (h *Hub) Heal(a, b raft.NodeID) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.chaos.partitions, partitionKey{A: a, B: b})
+	delete(h.chaos.partitions, partitionKey{A: b, B: a})
+}
+
+// DropRate sets the per-Send drop probability for messages originating
+// from id. p == 0 disables drops; p == 1 drops every message. Out-of-
+// range values are stored as-is — the Float64 draw will simply never
+// be less than 1.0 and always be at least 0.0.
+func (h *Hub) DropRate(id raft.NodeID, p float64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.chaos.dropPerNode[id] = p
+}
+
+// Delay sets the global per-Send delay range [min, max). When max <= min
+// the deterministic min value is applied with no RNG draw (zero-span
+// is the recommended way to write delay-only tests).
+func (h *Hub) Delay(minDelay, maxDelay time.Duration) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.chaos.delayMin = minDelay
+	h.chaos.delayMax = maxDelay
+}
+
+// Reorder toggles per-receiver reorder and sets the soft bucket size.
+// queueDepth is a soft minimum messages-per-receiver-per-drain; lower
+// values approach FIFO (RESEARCH Pitfall 6 — queueDepth of 1
+// degenerates to FIFO by construction).
+func (h *Hub) Reorder(enabled bool, queueDepth int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.chaos.reorderOn = enabled
+	h.chaos.reorderQD = queueDepth
+}
+
+// Duplicate sets the per-Send duplicate probability. p == 1 causes
+// every surviving message to be delivered twice (the duplicate arrives
+// one nanosecond after the original to preserve the dispatcher's
+// (deliverAt, seq) total order).
+func (h *Hub) Duplicate(p float64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.chaos.dupRate = p
 }
 
 // Send delivers msg from this endpoint to msg.To. Source identity is
