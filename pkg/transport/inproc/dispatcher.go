@@ -2,7 +2,7 @@ package inproc
 
 import (
 	"container/heap"
-	"sort"
+	"slices"
 	"time"
 
 	"github.com/prajwalmahajan101/toyraft/internal/clock"
@@ -131,10 +131,7 @@ func (h *Hub) dispatch() {
 		var armCh <-chan time.Time
 		if h.queue.Len() > 0 {
 			top := (*h.queue)[0]
-			d := top.deliverAt.Sub(h.clk.Now())
-			if d < 0 {
-				d = 0
-			}
+			d := max(top.deliverAt.Sub(h.clk.Now()), 0)
 			h.mu.Unlock()
 			if nextTimer == nil {
 				nextTimer = h.clk.NewTimer(d)
@@ -227,10 +224,7 @@ func (h *Hub) orderLocked(due []*pending) []*pending {
 		// shuffle of the whole bucket; with qd<len(bucket) the
 		// dispatcher emits qd-sized permuted windows in order.
 		for start := 0; start < len(bucket); start += qd {
-			end := start + qd
-			if end > len(bucket) {
-				end = len(bucket)
-			}
+			end := min(start+qd, len(bucket))
 			chunk := bucket[start:end]
 			if len(chunk) > 1 {
 				h.chaos.reorderRNG.Shuffle(len(chunk), func(i, j int) {
@@ -252,7 +246,7 @@ func (h *Hub) orderLocked(due []*pending) []*pending {
 		for id := range byTo {
 			remainder = append(remainder, id)
 		}
-		sort.Slice(remainder, func(i, j int) bool { return remainder[i] < remainder[j] })
+		slices.Sort(remainder)
 		for _, to := range remainder {
 			emit(byTo[to])
 		}
