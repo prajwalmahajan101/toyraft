@@ -16,6 +16,13 @@
 # pkg/raft and into pkg/storage. The drift gate would otherwise be blind
 # to changes in the new packages.
 #
+# Phase 4 (.planning/phases/04-test-infrastructure-fakeclock-inproc-hub/)
+# extended coverage to `./pkg/transport/inproc` — the new public-surface
+# transport hub (LLD §6: NewHub/Connect/Close/Partition/Heal/DropRate/
+# Delay/Reorder/Duplicate). `internal/clock` and `internal/raftest` are
+# deliberately NOT covered: internal/ packages have no exported surface
+# visible to library consumers.
+#
 # Exit 0 on match, 1 on drift.
 
 set -euo pipefail
@@ -33,13 +40,17 @@ trap 'rm -f "$CURRENT"' EXIT
     echo ""
     echo "=== go doc -all ./pkg/storage/storagetest ==="
     go doc -all ./pkg/storage/storagetest
+    echo ""
+    echo "=== go doc -all ./pkg/transport/inproc ==="
+    go doc -all ./pkg/transport/inproc
 } > "$CURRENT"
 
 if ! diff -u "$GOLDEN" "$CURRENT"; then
     echo "" >&2
     echo "*** LLD drift detected ***" >&2
-    echo "The go doc -all output for one of pkg/raft, pkg/storage, or" >&2
-    echo "pkg/storage/storagetest differs from $GOLDEN." >&2
+    echo "The go doc -all output for one of pkg/raft, pkg/storage," >&2
+    echo "pkg/storage/storagetest, or pkg/transport/inproc differs from" >&2
+    echo "$GOLDEN." >&2
     echo "" >&2
     echo "The diff above shows which package drifted (look for the" >&2
     echo "'=== go doc -all ./pkg/... ===' banner just before the change)." >&2

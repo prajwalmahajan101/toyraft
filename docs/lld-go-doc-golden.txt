@@ -377,3 +377,125 @@ type Factory func(t *testing.T) storage.Storage
     sub-test. Implementations MUST return a NEW Storage value on every call;
     sub-tests share no state.
 
+
+=== go doc -all ./pkg/transport/inproc ===
+package inproc // import "github.com/prajwalmahajan101/toyraft/pkg/transport/inproc"
+
+Package inproc implements an in-process Hub for transport-layer tests.
+The PUBLIC surface (NewHub, Connect, Partition, Heal, DropRate, Delay, Reorder,
+Duplicate, Close) is FROZEN by docs/LLD.md §6 — drift requires an ADR and an LLD
+amendment in the same PR (Working Agreement 4).
+
+This package is the SOLE in-process Transport implementation in v1; a shared
+transport conformance harness will be considered only when a second impl arrives
+(Phase 9 HTTP transport).
+
+The Hub delivers messages through a single dispatcher goroutine ordered by a
+(deliverAt, seq) min-heap. Plan 04-04 layered the chaos knobs (Partition/Heal,
+DropRate, Delay, Reorder, Duplicate) on top: every knob is driven by ONE int64
+Seed via SHA-256-tagged per-knob sub-RNGs (see ADR-0007). Same Seed plus the
+same canned message sequence yields a byte-identical delivery trace.
+
+Concurrency: ADR-0004 (single mutex). Hub.Close shutdown ordering follows
+CONCURRENCY.md §6 (cancel → WaitGroup join → sync.Once-guarded cleanup).
+All channel sends escape via h.ctx.Done() per CONCURRENCY.md §5.
+
+TYPES
+
+type Endpoint struct {
+	// Has unexported fields.
+}
+    Endpoint is a per-node handle returned by Connect. Send is bound to this
+    node's identity at Connect time so callers cannot spoof From.
+
+func (e *Endpoint) ID() raft.NodeID
+    ID returns the node identity this endpoint is bound to.
+
+func (e *Endpoint) Recv() <-chan raft.Message
+    Recv returns the receive channel for this endpoint. The Hub never closes
+    this channel (CONCURRENCY.md §5); shutdown is via Hub.Close and the
+    dispatcher's ctx.Done escape.
+
+func (e *Endpoint) Send(ctx context.Context, msg raft.Message) error
+    Send delivers msg from this endpoint to msg.To. Source identity is taken
+    from the endpoint binding, not msg.From — callers cannot spoof the sender.
+    The returned error is always nil in plan 04-03; plan 04-04 may surface
+    context.Canceled when Hub is closed.
+
+type Hub struct {
+	// Has unexported fields.
+}
+    Hub is the in-process transport bus. NewHub returns a running Hub with a
+    single dispatcher goroutine; per-node endpoints are produced by Connect.
+    Shutdown is via Close (idempotent, sync.Once-guarded). Hub state is guarded
+    by a single mutex per ADR-0004.
+
+func NewHub(cfg HubConfig) (*Hub, error)
+    NewHub returns a running Hub configured by cfg. The dispatcher goroutine is
+    started before return; the caller must Close to release it.
+
+func (h *Hub) Close() error
+    Close cancels the Hub's context, joins the dispatcher within CloseTimeout,
+    and is safe to call from multiple goroutines (sync.Once guarded). Close
+    always returns nil; a dispatcher-join overrun is a best-effort leak that
+    goleak will catch in tests.
+
+func (h *Hub) Connect(id raft.NodeID) *Endpoint
+    Connect returns the Endpoint for id, allocating a new bounded inbound
+    channel on first call. Idempotent: subsequent calls with the same id return
+    an Endpoint sharing the same inbound channel.
+
+func (h *Hub) Delay(minDelay, maxDelay time.Duration)
+    Delay sets the global per-Send delay range [min, max). When max <= min
+    the deterministic min value is applied with no RNG draw (zero-span is the
+    recommended way to write delay-only tests).
+
+func (h *Hub) DropRate(id raft.NodeID, p float64)
+    DropRate sets the per-Send drop probability for messages originating from
+    id. p == 0 disables drops; p == 1 drops every message. Out-of- range values
+    are stored as-is — the Float64 draw will simply never be less than 1.0 and
+    always be at least 0.0.
+
+func (h *Hub) Duplicate(p float64)
+    Duplicate sets the per-Send duplicate probability. p == 1 causes every
+    surviving message to be delivered twice (the duplicate arrives one
+    nanosecond after the original to preserve the dispatcher's (deliverAt,
+    seq) total order).
+
+func (h *Hub) Heal(a, b raft.NodeID)
+    Heal removes the symmetric cut installed by Partition. Idempotent.
+
+func (h *Hub) Partition(a, b raft.NodeID)
+    Partition installs a symmetric cut between a and b: both (a -> b) and (b ->
+    a) are dropped silently from Send. Asymmetric partitions are out of scope
+    for v1 (RESEARCH Pitfall 7, ADR-0007).
+
+func (h *Hub) Reorder(enabled bool, queueDepth int)
+    Reorder toggles per-receiver reorder and sets the soft bucket size.
+    queueDepth is a soft minimum messages-per-receiver-per-drain; lower values
+    approach FIFO (RESEARCH Pitfall 6 — queueDepth of 1 degenerates to FIFO by
+    construction).
+
+type HubConfig struct {
+	// Clock drives the dispatcher's logical time. Required. Tests pass a
+	// *clock.Fake here so message delivery is reproducible from a seed.
+	Clock clock.Clock
+
+	// Seed is the int64 PRNG seed for chaos decisions. Unused in plan
+	// 04-03 (no chaos yet); plan 04-04 will split this into per-knob
+	// sub-RNGs (see ADR-0007).
+	Seed int64
+
+	// InboundCap is the per-node inbound channel capacity. Default 256
+	// when zero. Bounded buffers + select-on-ctx are how Close unblocks
+	// parked senders (SC4).
+	InboundCap int
+
+	// CloseTimeout caps how long Close waits for the dispatcher to exit
+	// before declaring leak. Default 100ms per SC4.
+	CloseTimeout time.Duration
+}
+    HubConfig configures a Hub. Zero-value-safe modulo Clock: NewHub returns
+    an actionable error when Clock is nil (FOUND-05 spirit). InboundCap and
+    CloseTimeout receive sane defaults when zero.
+

@@ -31,5 +31,8 @@ lld-drift-update:
 		echo ""; \
 		echo "=== go doc -all ./pkg/storage/storagetest ==="; \
 		go doc -all ./pkg/storage/storagetest; \
+		echo ""; \
+		echo "=== go doc -all ./pkg/transport/inproc ==="; \
+		go doc -all ./pkg/transport/inproc; \
 	} > docs/lld-go-doc-golden.txt
 	@echo "Regenerated docs/lld-go-doc-golden.txt — review the diff and commit alongside docs/LLD.md."
