@@ -149,10 +149,11 @@ func newNode(cfg *Config) (*node, error) {
 	// resetElectionTimeoutLocked lives in follower.go; Go allows
 	// forward references within a package.
 	n.resetElectionTimeoutLocked()
-	// onElectionTrigger is left nil in 05-02. 05-03 wires it to
-	// becomeCandidateLocked via wireElectionTriggerLocked (lives in
-	// pkg/raft/candidate.go); until that commit lands, follower
-	// tests install their own recorder via n.onElectionTrigger.
+	// 05-03 wires the election-trigger hook so the follower's
+	// election timeout calls becomeCandidateLocked. The helper lives
+	// in pkg/raft/candidate.go; 05-02 ships the hook as nil-safe so
+	// its own tests pass without depending on the candidate file.
+	n.wireElectionTriggerLocked()
 	n.started = true
 	return n, nil
 }
