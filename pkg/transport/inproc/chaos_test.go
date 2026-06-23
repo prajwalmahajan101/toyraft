@@ -45,9 +45,7 @@ func newRecordingRig() *recordingRig {
 }
 
 func (r *recordingRig) attach(ep *inproc.Endpoint) {
-	r.wg.Add(1)
-	go func() {
-		defer r.wg.Done()
+	r.wg.Go(func() {
 		for {
 			select {
 			case m, ok := <-ep.Recv():
@@ -65,7 +63,7 @@ func (r *recordingRig) attach(ep *inproc.Endpoint) {
 				return
 			}
 		}
-	}()
+	})
 }
 
 func (r *recordingRig) drain() map[raft.NodeID][]deliveredMsg {

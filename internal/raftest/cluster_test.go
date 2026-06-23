@@ -80,7 +80,6 @@ func TestRecorder_PorcupineImport(t *testing.T) {
 func TestCluster_OddNRequired(t *testing.T) {
 	cases := []int{0, 1, 2, 4, 6, 8}
 	for _, n := range cases {
-		n := n
 		t.Run(strconv.Itoa(n), func(t *testing.T) {
 			fake := &fatalRecorder{TB: t}
 			defer func() { _ = recover() }()
