@@ -25,8 +25,11 @@ func (fakeStorage) LoadHardState() (HardState, error)     { return HardState{}, 
 func (fakeStorage) Snapshot() ([]byte, Index, error)      { return nil, 0, ErrSnapshotUnsupported }
 func (fakeStorage) Restore([]byte) error                  { return ErrSnapshotUnsupported }
 
-// newTestNode constructs a *node for tests via newNode, asserting no
-// construction error. Caller decides whether to flip started.
+// newTestNode constructs a *node for tests via newNode and then flips
+// started=false so callers can exercise the pre-start ErrStopped guard
+// (Pitfall 6). 05-02 extended newNode to set started=true after the
+// LoadHardState + RNG bootstrap, so the helper must walk that flag
+// back for tests that care about the pre-start path.
 func newTestNode(t *testing.T, peers []NodeID) *node {
 	t.Helper()
 	n, err := newNode(&Config{
@@ -37,16 +40,24 @@ func newTestNode(t *testing.T, peers []NodeID) *node {
 	if err != nil {
 		t.Fatalf("newNode: %v", err)
 	}
+	n.started = false
 	return n
 }
 
-// newStartedNode is newTestNode + started=true so Step proceeds to
-// stepLocked. Used by every test that does not care about the
-// pre-start ErrStopped path.
+// newStartedNode returns a node with started=true so Step proceeds to
+// stepLocked. After 05-02 this is just newNode (started=true by
+// construction), but we keep the helper so existing call sites read
+// the same.
 func newStartedNode(t *testing.T, peers []NodeID) *node {
 	t.Helper()
-	n := newTestNode(t, peers)
-	n.started = true
+	n, err := newNode(&Config{
+		ID:      peers[0],
+		Peers:   peers,
+		Storage: fakeStorage{},
+	})
+	if err != nil {
+		t.Fatalf("newNode: %v", err)
+	}
 	return n
 }
 
@@ -96,8 +107,14 @@ func TestMaybeStepDownBumpsEpochAndClearsState(t *testing.T) {
 	if n.votesReceived != nil {
 		t.Errorf("votesReceived: got %v, want nil", n.votesReceived)
 	}
-	if n.leaderHint != "" {
-		t.Errorf("leaderHint: got %q, want empty", n.leaderHint)
+	// maybeStepDownLocked clears leaderHint; handleAppendEntriesLocked
+	// (landed by 05-02) then installs m.From as the new leader because
+	// the AE proves there IS a leader at the new term. This is the
+	// correct Raft Figure-2 receiver behaviour — the prior assertion
+	// (leaderHint=="" after step-down via AE) reflected the 05-01-era
+	// no-op handler.
+	if n.leaderHint != "n2" {
+		t.Errorf("leaderHint: got %q, want %q (handleAppendEntriesLocked installs m.From)", n.leaderHint, "n2")
 	}
 	if n.pendingHS == nil {
 		t.Fatalf("pendingHS: got nil, want queued HardState")
