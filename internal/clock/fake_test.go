@@ -199,16 +199,16 @@ func TestFake_NewTicker_QuiescenceTimeout_Panics(t *testing.T) {
 // test fails immediately.
 func TestFakeAdvance_StableOrder_100Runs(t *testing.T) {
 	t.Parallel()
-	for run := 0; run < 100; run++ {
+	for run := range 100 {
 		f := clock.NewFake()
 		const n = 16
 		chs := make([]<-chan time.Time, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			chs[i] = f.NewTimer(10 * time.Millisecond).C()
 		}
 		f.Advance(10 * time.Millisecond)
 		order := make([]int, 0, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			select {
 			case <-chs[i]:
 				order = append(order, i)
