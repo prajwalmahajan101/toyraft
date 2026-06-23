@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"fmt"
 	"log/slog"
 	mrand "math/rand/v2"
 	"slices"
@@ -75,11 +76,20 @@ type node struct {
 	cfg     *Config
 	log2    *slog.Logger // alias to cfg.Logger captured at construction; named log2 to avoid clashing with the replicated log field
 
-	// started flips true once LoadHardState completes (plan 05-02's first
-	// responsibility — the start sequence). Step returns ErrStopped until
-	// then; this keeps a stray MsgTick from operating on a zero
-	// currentTerm before the persistent state is loaded (Pitfall 6).
+	// started flips true once LoadHardState completes (plan 05-02's
+	// start sequence). Step returns ErrStopped until then; this keeps
+	// a stray MsgTick from operating on a zero currentTerm before the
+	// persistent state is loaded (Pitfall 6).
 	started bool
+
+	// onElectionTrigger is the W2-parallel hook (05-02 <-> 05-03) for
+	// the follower's election-timeout transition. When nil (default),
+	// the trigger is a deterministic no-op so 05-02 lands without
+	// touching 05-03's becomeCandidateLocked. 05-03 wires this to
+	// becomeCandidateLocked at construction time so the post-merge
+	// path is the real Raft §5.2 promotion. Tests in 05-02 install
+	// recorders here to assert the trigger fires at the right tick.
+	onElectionTrigger func()
 }
 
 // pendingMsg pairs an outbound Message with the stepDownEpoch at enqueue
@@ -91,12 +101,19 @@ type pendingMsg struct {
 	msg   Message
 }
 
-// newNode constructs a *node from cfg. It applies defaults, validates,
-// clones + sorts the peer set (slices.Sort — C-8 prevention), and
-// captures the slog logger. It does NOT call LoadHardState — that runs
-// in the start sequence landed by plan 05-02 next to the RNG seed draw.
-// started remains false until then; Step returns ErrStopped in the
-// interim (Pitfall 6).
+// newNode constructs a *node from cfg and runs the full start sequence:
+// apply defaults -> validate -> clone+sort peers -> LoadHardState ->
+// construct per-node RNG -> draw the initial randomised election timeout
+// -> flip started=true. Step returns ErrStopped before started flips
+// (Pitfall 6 — pre-start state machine guard).
+//
+// The HardState load is the FIRST persistent-state action; a stray
+// MsgTick that races construction will hit the ErrStopped guard rather
+// than operate on zero currentTerm. The RNG is per-node (P1-4 — no
+// shared math/rand global) and seeded via Config.Seed XOR FNV(nodeID)
+// per ADR-0009. resetElectionTimeoutLocked draws the first timeout
+// before started=true so a Follower's very first tick has a non-zero
+// electionTimeout to compare against.
 //
 // The internal Log is constructed via &Log{} (zero-value safe per
 // FOUND-05). Phase 2 deliberately exposes no NewLog constructor.
@@ -118,6 +135,25 @@ func newNode(cfg *Config) (*node, error) {
 		cfg:        cfg,
 		log2:       cfg.Logger,
 	}
+	// Load persisted HardState BEFORE accepting any Step events. A
+	// stray MsgTick before this completes would race on zero
+	// currentTerm (Pitfall 6).
+	hs, err := cfg.Storage.LoadHardState()
+	if err != nil {
+		return nil, fmt.Errorf("raft: load hard state: %w", err)
+	}
+	n.currentTerm = hs.CurrentTerm
+	n.votedFor = hs.VotedFor
+	n.commitIndex = hs.Commit
+	n.rng = newNodeRNG(cfg.Seed, cfg.ID)
+	// resetElectionTimeoutLocked lives in follower.go; Go allows
+	// forward references within a package.
+	n.resetElectionTimeoutLocked()
+	// onElectionTrigger is left nil in 05-02. 05-03 wires it to
+	// becomeCandidateLocked via wireElectionTriggerLocked (lives in
+	// pkg/raft/candidate.go); until that commit lands, follower
+	// tests install their own recorder via n.onElectionTrigger.
+	n.started = true
 	return n, nil
 }
 

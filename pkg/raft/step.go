@@ -53,13 +53,14 @@ func (n *node) stepLocked(m Message) error {
 // are not exercised by any Phase 5 test path — becomeLeader (05-03)
 // transitions to Leader but only after wiring its own tick loop and
 // outbound AE pipeline lands in Phase 6.
-func (n *node) tickFollowerLocked()                     { /* TODO(05-02) */ }
-func (n *node) tickCandidateLocked()                    { /* TODO(05-03) */ }
-func (n *node) tickLeaderLocked()                       { /* TODO(Phase 6 — leader.go) */ }
-func (n *node) handleRequestVoteLocked(Message)         { /* TODO(05-02) */ }
-func (n *node) handleRequestVoteResponseLocked(Message) { /* TODO(05-03) */ }
-func (n *node) handleAppendEntriesLocked(Message)       { /* TODO(05-02) */ }
-func (n *node) handleAppendEntriesRespLocked(Message)   { /* TODO(Phase 6) */ }
+// tickCandidateLocked + handleRequestVoteResponseLocked: filled by 05-03
+// in pkg/raft/candidate.go.
+// tickFollowerLocked + handleRequestVoteLocked + handleAppendEntriesLocked:
+// filled by 05-02 in pkg/raft/follower.go.
+// becomeCandidateLocked / becomeLeaderLocked: filled by 05-03 in
+// pkg/raft/candidate.go and pkg/raft/leader_stub.go.
+func (n *node) tickLeaderLocked()                     { /* TODO(Phase 6 — leader.go) */ }
+func (n *node) handleAppendEntriesRespLocked(Message) { /* TODO(Phase 6) */ }
 
 // queueMsgLocked attaches the current stepDownEpoch to an outbound
 // Message and appends it to the Ready() drain buffer. The epoch token
