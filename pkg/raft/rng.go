@@ -3,28 +3,31 @@ package raft
 import (
 	"hash/fnv"
 	mrand "math/rand/v2"
-	"time"
+
+	"github.com/prajwalmahajan101/toyraft/internal/clock"
 )
 
 // newNodeRNG constructs a per-node *math/rand/v2.Rand seeded from
 // Config.Seed mixed with nodeID via FNV-1a 64. When cfgSeed == 0 the
-// seed degrades to FNV(nodeID) ^ uint64(time.Now().UnixNano()) per
-// ROADMAP SC2.
+// seed degrades to FNV(nodeID) ^ uint64(clk.Now().UnixNano()) per
+// ROADMAP SC2. The clock parameter routes the "fallback entropy"
+// path through clock.Clock so wall-clock access stays confined to
+// internal/clock/real.go (gated by scripts/check-no-time-now.sh).
 //
-// Mixing chain: FNV-1a 64(nodeID) -> XOR with cfgSeed (or time.Now)
+// Mixing chain: FNV-1a 64(nodeID) -> XOR with cfgSeed (or clk.Now)
 // -> splitmix64 -> rand/v2.NewPCG. Rationale and rejected alternatives
 // are documented in docs/adr/0009-per-node-rng-mixing.md.
 //
 // Per-instance (not global) Rand — P1-4 prevention: the global
 // math/rand source is forbidden because tests racing on it produce
 // scheduler-dependent draws.
-func newNodeRNG(cfgSeed int64, id NodeID) *mrand.Rand {
+func newNodeRNG(cfgSeed int64, id NodeID, clk clock.Clock) *mrand.Rand {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(id))
 	nodeHash := h.Sum64()
 	var seed uint64
 	if cfgSeed == 0 {
-		seed = nodeHash ^ uint64(time.Now().UnixNano())
+		seed = nodeHash ^ uint64(clk.Now().UnixNano())
 	} else {
 		seed = nodeHash ^ uint64(cfgSeed)
 	}

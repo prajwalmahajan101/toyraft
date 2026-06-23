@@ -3,6 +3,8 @@ package raft
 import (
 	"testing"
 	"time"
+
+	"github.com/prajwalmahajan101/toyraft/internal/clock"
 )
 
 // TestRNGPerNodeSameSeedDifferentNodeIDs pins ROADMAP SC2: two distinct
@@ -15,8 +17,8 @@ import (
 func TestRNGPerNodeSameSeedDifferentNodeIDs(t *testing.T) {
 	t.Parallel()
 	const seed = int64(42)
-	rA := newNodeRNG(seed, NodeID("node-a"))
-	rB := newNodeRNG(seed, NodeID("node-b"))
+	rA := newNodeRNG(seed, NodeID("node-a"), clock.NewReal())
+	rB := newNodeRNG(seed, NodeID("node-b"), clock.NewReal())
 
 	differing := 0
 	for range 100 {
@@ -38,8 +40,8 @@ func TestRNGPerNodeSameSeedDifferentNodeIDs(t *testing.T) {
 func TestRNGReproducibleSameSeedSameNodeID(t *testing.T) {
 	t.Parallel()
 	const seed = int64(42)
-	r1 := newNodeRNG(seed, NodeID("n1"))
-	r2 := newNodeRNG(seed, NodeID("n1"))
+	r1 := newNodeRNG(seed, NodeID("n1"), clock.NewReal())
+	r2 := newNodeRNG(seed, NodeID("n1"), clock.NewReal())
 	for i := range 100 {
 		a := r1.Uint64()
 		b := r2.Uint64()
@@ -58,9 +60,9 @@ func TestRNGReproducibleSameSeedSameNodeID(t *testing.T) {
 // xor with UnixNano shifts the seed every nanosecond).
 func TestRNGZeroSeedUsesTimeAndNodeID(t *testing.T) {
 	t.Parallel()
-	r1 := newNodeRNG(0, NodeID("n1"))
+	r1 := newNodeRNG(0, NodeID("n1"), clock.NewReal())
 	time.Sleep(time.Microsecond)
-	r2 := newNodeRNG(0, NodeID("n1"))
+	r2 := newNodeRNG(0, NodeID("n1"), clock.NewReal())
 	if r1 == nil || r2 == nil {
 		t.Fatalf("newNodeRNG(0, ...) returned nil")
 	}
@@ -76,8 +78,8 @@ func TestRNGZeroSeedUsesTimeAndNodeID(t *testing.T) {
 // tight loop, the divergence comes from the FNV(nodeID) component.
 func TestRNGZeroSeedDifferentNodeIDsDiffer(t *testing.T) {
 	t.Parallel()
-	rA := newNodeRNG(0, NodeID("alpha"))
-	rB := newNodeRNG(0, NodeID("bravo"))
+	rA := newNodeRNG(0, NodeID("alpha"), clock.NewReal())
+	rB := newNodeRNG(0, NodeID("bravo"), clock.NewReal())
 	differing := 0
 	for range 100 {
 		if rA.Uint64() != rB.Uint64() {

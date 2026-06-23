@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"slices"
 	"time"
+
+	"github.com/prajwalmahajan101/toyraft/internal/clock"
 )
 
 // Storage is the subset of pkg/storage.Storage that the internal *node
@@ -67,9 +69,17 @@ type Config struct {
 	HeartbeatInterval time.Duration
 
 	// Seed deterministically seeds the per-node math/rand/v2 RNG that
-	// draws election timeouts. Zero is a legal seed (math/rand/v2 accepts
-	// it); callers wanting nondeterminism should pass time.Now().UnixNano().
+	// draws election timeouts. Zero degrades to Clock-driven entropy
+	// (clk.Now().UnixNano() XOR FNV(nodeID)) so the unset case still
+	// produces divergent per-node draws. Callers wanting determinism
+	// must supply a nonzero value.
 	Seed int64
+
+	// Clock is the time source. nil is replaced by clock.NewReal()
+	// during applyDefaults. Tests supply clock.NewFake() for determinism
+	// (Phase 4 ADR-0006). Wall-clock access in pkg/raft routes through
+	// this Clock (gated by scripts/check-no-time-now.sh).
+	Clock clock.Clock
 
 	// Storage is the durable backing store. MUST be non-nil; v1 always
 	// uses pkg/storage/memory in tests and pkg/storage/file in production.
@@ -95,6 +105,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.HeartbeatInterval == 0 {
 		c.HeartbeatInterval = 100 * time.Millisecond
+	}
+	if c.Clock == nil {
+		c.Clock = clock.NewReal()
 	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()
