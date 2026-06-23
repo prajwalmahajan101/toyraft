@@ -2,6 +2,7 @@ package inproc
 
 import (
 	"container/heap"
+	"sort"
 	"time"
 
 	"github.com/prajwalmahajan101/toyraft/pkg/raft"
@@ -74,14 +75,34 @@ func (h *Hub) peekDue(now time.Time) *pending {
 	return top
 }
 
+// drainDueLocked pops every pending message whose deliverAt <= now and
+// returns them in (deliverAt, seq) total order. Caller holds h.mu.
+func (h *Hub) drainDueLocked(now time.Time) []*pending {
+	var due []*pending
+	for {
+		p := h.peekDue(now)
+		if p == nil {
+			break
+		}
+		heap.Pop(h.queue)
+		due = append(due, p)
+	}
+	return due
+}
+
 // dispatch runs on a single goroutine started by NewHub. The loop:
 //
 //  1. Block on wake OR h.ctx.Done.
-//  2. While the heap has a due message, pop it under h.mu and deliver
-//     to the receiver's inbound channel.
+//  2. Drain every due pending under h.mu via drainDueLocked.
+//  3. When chaos.reorderOn is set, bucket the due batch per receiver
+//     (walking h.sortedNodes for deterministic iteration order — never
+//     ranging the nodes map; RESEARCH Pitfall 2) and shuffle each
+//     bucket with chaos.reorderRNG under h.mu so the RNG draw is
+//     deterministic w.r.t. seed.
+//  4. Deliver each pending to its receiver's inbound channel; the send
+//     selects on h.ctx.Done so a parked dispatcher unblocks within
+//     CloseTimeout (SC4, RESEARCH Pitfall 5).
 //
-// Both the outer wait and the inbound send escape via h.ctx.Done so
-// that Close unblocks a parked dispatcher within CloseTimeout (SC4).
 // No per-message goroutines: this is the single delivery goroutine
 // (RESEARCH Pattern 2, Pitfall 4).
 func (h *Hub) dispatch() {
@@ -94,26 +115,80 @@ func (h *Hub) dispatch() {
 		}
 		for {
 			h.mu.Lock()
-			p := h.peekDue(h.clk.Now())
-			if p == nil {
+			due := h.drainDueLocked(h.clk.Now())
+			if len(due) == 0 {
 				h.mu.Unlock()
 				break
 			}
-			heap.Pop(h.queue)
-			ns, ok := h.nodes[p.to]
-			h.mu.Unlock()
-			if !ok {
-				// Receiver never Connected — silently drop.
-				continue
+			ordered := h.orderLocked(due)
+			// Snapshot the receiver map under h.mu so the inbound
+			// sends below can run lock-free (the dispatcher is the
+			// only writer to inbound channels per nodeState).
+			recvs := make([]*nodeState, len(ordered))
+			for i, p := range ordered {
+				recvs[i] = h.nodes[p.to]
 			}
-			// Load-bearing escape: without this select branch a
-			// parked dispatcher could never unblock on Close
-			// (RESEARCH Pitfall 5, SC4).
-			select {
-			case ns.inbound <- p.msg:
-			case <-h.ctx.Done():
-				return
+			h.mu.Unlock()
+
+			for i, p := range ordered {
+				ns := recvs[i]
+				if ns == nil {
+					// Receiver never Connected — silently drop.
+					continue
+				}
+				select {
+				case ns.inbound <- p.msg:
+				case <-h.ctx.Done():
+					return
+				}
 			}
 		}
 	}
+}
+
+// orderLocked applies the reorder knob to a batch drained at the same
+// logical instant. With reorder disabled, the batch is returned as-is
+// (already in (deliverAt, seq) total order from drainDueLocked).
+//
+// With reorder enabled, the batch is bucketed per receiver — iteration
+// over the bucketing walks h.sortedNodes so the visit order is
+// deterministic, never the nodes map (RESEARCH Pitfall 2). Each
+// non-singleton bucket is shuffled by chaos.reorderRNG. queueDepth of
+// 1 degenerates to FIFO by construction (RESEARCH Pitfall 6, ADR-0007)
+// because a one-element bucket has nothing to permute.
+//
+// Caller holds h.mu so the RNG draw is deterministic.
+func (h *Hub) orderLocked(due []*pending) []*pending {
+	if !h.chaos.reorderOn || len(due) < 2 {
+		return due
+	}
+	byTo := make(map[raft.NodeID][]*pending, len(due))
+	for _, p := range due {
+		byTo[p.to] = append(byTo[p.to], p)
+	}
+	out := due[:0]
+	for _, to := range h.sortedNodes {
+		bucket := byTo[to]
+		if len(bucket) > 1 {
+			h.chaos.reorderRNG.Shuffle(len(bucket), func(i, j int) {
+				bucket[i], bucket[j] = bucket[j], bucket[i]
+			})
+		}
+		out = append(out, bucket...)
+		delete(byTo, to)
+	}
+	// Any receiver not in sortedNodes (should not happen — Send only
+	// enqueues for connected ids — but defensive): append in nodeID
+	// order to keep this branch deterministic too.
+	if len(byTo) > 0 {
+		remainder := make([]raft.NodeID, 0, len(byTo))
+		for id := range byTo {
+			remainder = append(remainder, id)
+		}
+		sort.Slice(remainder, func(i, j int) bool { return remainder[i] < remainder[j] })
+		for _, to := range remainder {
+			out = append(out, byTo[to]...)
+		}
+	}
+	return out
 }
