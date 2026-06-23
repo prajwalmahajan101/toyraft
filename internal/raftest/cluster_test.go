@@ -118,7 +118,7 @@ func TestCluster_NodeIDsZeroPadded(t *testing.T) {
 	}
 }
 
-// TestClusterDrivesElection — sanity that the Phase 5 raftNodeAdapter
+// TestClusterDrivesElection — sanity that the Phase 5 RaftNodeAdapter
 // wiring actually elects a leader under no chaos. 50 ticks of 100ms
 // gives the slowest 5-node cluster (ElectionTimeoutMax = 600ms = 6
 // ticks) ample budget to converge. Asserts at least one Leader has

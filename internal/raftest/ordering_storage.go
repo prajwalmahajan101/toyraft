@@ -36,19 +36,19 @@ import (
 	"github.com/prajwalmahajan101/toyraft/pkg/storage"
 )
 
-// orderingEventKind discriminates entries in the monotonic event log.
-type orderingEventKind int
+// OrderingEventKind discriminates entries in the monotonic event log.
+type OrderingEventKind int
 
 const (
-	eventSaveHS orderingEventKind = iota + 1
-	eventSend
+	EventSaveHS OrderingEventKind = iota + 1
+	EventSend
 )
 
-// orderingEvent is one record in the monotonic event log. Only the
+// OrderingEvent is one record in the monotonic event log. Only the
 // kind-relevant field (hs or msg) is populated for any given event.
-type orderingEvent struct {
+type OrderingEvent struct {
 	seq  uint64
-	kind orderingEventKind
+	kind OrderingEventKind
 	hs   raft.HardState
 	msg  raft.Message
 }
@@ -67,7 +67,7 @@ type OrderingStorage struct {
 
 	mu     sync.Mutex
 	seq    uint64
-	events []orderingEvent
+	events []OrderingEvent
 }
 
 // Compile-time interface assertion. Catches drift if storage.Storage
@@ -88,7 +88,7 @@ func NewOrderingStorage(inner storage.Storage) *OrderingStorage {
 func (o *OrderingStorage) SaveHardState(hs raft.HardState) error {
 	o.mu.Lock()
 	o.seq++
-	o.events = append(o.events, orderingEvent{seq: o.seq, kind: eventSaveHS, hs: hs})
+	o.events = append(o.events, OrderingEvent{seq: o.seq, kind: EventSaveHS, hs: hs})
 	o.mu.Unlock()
 	return o.inner.SaveHardState(hs)
 }
@@ -151,14 +151,14 @@ func (o *OrderingStorage) Restore(data []byte) error {
 func (o *OrderingStorage) RecordSend(m raft.Message) {
 	o.mu.Lock()
 	o.seq++
-	o.events = append(o.events, orderingEvent{seq: o.seq, kind: eventSend, msg: m})
+	o.events = append(o.events, OrderingEvent{seq: o.seq, kind: EventSend, msg: m})
 	o.mu.Unlock()
 }
 
 // Events returns a defensive copy of the recorded event log. Useful
 // for tests that want to inspect ordering beyond the canned precedence
 // assertion below.
-func (o *OrderingStorage) Events() []orderingEvent {
+func (o *OrderingStorage) Events() []OrderingEvent {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return slices.Clone(o.events)
@@ -199,7 +199,7 @@ func (o *OrderingStorage) CheckHardStatePrecedesVoteGrantedResponse() error {
 	events := o.Events()
 
 	for i, e := range events {
-		if e.kind != eventSend {
+		if e.kind != EventSend {
 			continue
 		}
 		m := e.msg
@@ -213,7 +213,7 @@ func (o *OrderingStorage) CheckHardStatePrecedesVoteGrantedResponse() error {
 		found := false
 		for j := i - 1; j >= 0; j-- {
 			p := events[j]
-			if p.kind != eventSaveHS {
+			if p.kind != EventSaveHS {
 				continue
 			}
 			if p.hs.CurrentTerm == m.Term && p.hs.VotedFor == m.To {
