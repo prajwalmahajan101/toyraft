@@ -118,6 +118,23 @@ func TestCluster_NodeIDsZeroPadded(t *testing.T) {
 	}
 }
 
+// TestClusterDrivesElection — sanity that the Phase 5 raftNodeAdapter
+// wiring actually elects a leader under no chaos. 50 ticks of 100ms
+// gives the slowest 5-node cluster (ElectionTimeoutMax = 600ms = 6
+// ticks) ample budget to converge. Asserts at least one Leader has
+// emerged AND the at-most-one-leader-per-term invariant holds.
+func TestClusterDrivesElection(t *testing.T) {
+	c := raftest.NewCluster(t, 3, 0xE1EC1)
+	for range 50 {
+		c.Tick(100 * time.Millisecond)
+		c.AssertAtMostOneLeaderPerTerm()
+		if c.HasLeader() {
+			return
+		}
+	}
+	t.Fatalf("no leader elected after 50 ticks (seed=%x)", 0xE1EC1)
+}
+
 // fatalRecorder is a testing.TB wrapper that records whether Fatalf was
 // called instead of aborting the goroutine. Used by TestCluster_OddNRequired.
 type fatalRecorder struct {

@@ -55,3 +55,22 @@ func (t *TestNode) Step(m Message) error {
 func (t *TestNode) Ready() (msgs []Message, hs *HardState) {
 	return t.n.Ready()
 }
+
+// RoleAndTerm returns the current (Role, Term) under n.mu. Used by
+// internal/raftest.Cluster.AssertAtMostOneLeaderPerTerm (SC6 / ELEC-10)
+// and the leader-detection helpers (HasLeader, Leader).
+//
+// The snapshot is taken with the lock briefly held; callers receive
+// values, not references, so subsequent state transitions on the
+// node do not aliasing-mutate the returned pair.
+func (t *TestNode) RoleAndTerm() (Role, Term) {
+	t.n.mu.Lock()
+	defer t.n.mu.Unlock()
+	return t.n.role, t.n.currentTerm
+}
+
+// ID returns the configured NodeID. Stable for the lifetime of the
+// node; safe to call without locking.
+func (t *TestNode) ID() NodeID {
+	return t.n.id
+}
