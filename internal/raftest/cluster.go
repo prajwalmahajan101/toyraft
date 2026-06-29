@@ -210,6 +210,15 @@ func (c *Cluster) tickOnce(a *RaftNodeAdapter) {
 		}
 	}
 drainDone:
+	// P0-4 final: the node calls Storage.Append (the OrderingStorage
+	// mirror, plan 06-04) from WITHIN node.Step above — both the leader's
+	// proposeLocked and the follower's AppendEntries receiver persist
+	// before stepLocked returns. So EventAppend is recorded during Step,
+	// strictly before the Ready()/RecordSend below, exactly as
+	// SaveHardState-before-send holds for HardState (SC5). No structural
+	// change to this loop is needed; AssertAppendPrecedesAppendEntriesResponse
+	// reads the same monotonic event log.
+	//
 	// 3. Ready() — outbound messages + pending HardState.
 	msgs, hs := a.node.Ready()
 	// 4. SC5: persist HardState BEFORE any Send.
