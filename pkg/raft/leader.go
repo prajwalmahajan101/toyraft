@@ -67,6 +67,28 @@ func (n *node) sendAppendEntriesLocked(peer NodeID) {
 	})
 }
 
+// proposeLocked appends a client proposal to the leader's log and reports
+// the assigned index. Caller MUST hold n.mu. (REPL-02, RESEARCH Pattern 4.)
+//
+// Returns (0, false) when not the leader — only a leader may originate an
+// entry (Raft §5.3). On success it appends Entry{currentTerm, lastIndex+1,
+// data}, marks the leader's own match as fully replicated locally
+// (matchIndex[self] = idx), and returns (idx, true). The next
+// tickLeaderLocked / response cycle replicates the entry to followers.
+//
+// matchIndex[self] is set so the commit-rule snapshot (06-03) counts the
+// leader's own copy without special-casing self.
+func (n *node) proposeLocked(data []byte) (Index, bool) {
+	if n.role != Leader {
+		return 0, false
+	}
+	idx := n.log.LastIndex() + 1
+	n.log.Append(Entry{Term: n.currentTerm, Index: idx, Data: data})
+	n.matchIndex[n.id] = idx // leader's own entry is locally replicated
+	// Storage mirror added in 06-04 (P0-4 final).
+	return idx, true
+}
+
 // entriesFrom returns a DEEP COPY of the log entries with Index >= lo.
 //
 // Returns nil when lo > LastIndex() (the heartbeat case — no entries to
