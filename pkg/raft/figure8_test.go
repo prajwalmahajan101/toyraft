@@ -9,11 +9,23 @@ package raft_test
 // PACKAGE BOUNDARY (REQUIRED): this file is `package raft_test` (external)
 // because it imports internal/raftest, which imports pkg/raft — an
 // in-package `package raft` test would form an import cycle. It therefore
-// drives the cluster through the EXPORTED raftest.Cluster / raft.TestNode
-// surface only (NewCluster, Leader/NodeByID/ProposeToLeader/Tick/
-// AssertLogMatching/AssertNoCommittedEntryLost and TestNode's
-// Step/Ready/RoleAndTerm/Log/CommitIndex/MatchIndex/NextIndex) — never
-// in-package *node access. Same precedent as invariant_test.go.
+// drives the cluster through the EXPORTED raftest.Cluster + public raft.Node
+// surface only (NewCluster, Leader/NodeByID/Tick/AssertLogMatching/
+// AssertNoCommittedEntryLost, the raftest seams ProposeIntoForTest/LogOf, and
+// the public raft.Node.Status) — never in-package *node access.
+//
+// 07-04 NOTE: raft.TestNode is DELETED in Phase 7. The old call sites that
+// reached the wrapped node via Cluster.NodeByID(id).Node().{Propose,Log,
+// CommitIndex,RoleAndTerm} are rewired to the public surface:
+//   - Propose(Index,bool) -> Cluster.ProposeIntoForTest(id, op) (index-pinned
+//     seam: injects via public Propose on a cluster-ctx goroutine, returns the
+//     leader's assigned index from its Storage mirror WITHOUT blocking on
+//     apply — faithful to the non-committing isolated-leader stages a/b/c).
+//   - Log() -> Cluster.LogOf(id) (reads the durable Storage mirror, ADR-0011).
+//   - CommitIndex() -> raft.Node.Status().CommitIndex.
+//   - RoleAndTerm() -> raft.Node.Status().{Role,Term}.
+// All four Figure-8 safety assertions + AssertNoCommittedEntryLost are
+// preserved byte-for-byte in intent.
 //
 // DETERMINISM STRATEGY: election timeouts are RNG-driven, so neither the
 // WHICH node leads a stage nor the ABSOLUTE term it wins at is fixed across
@@ -100,9 +112,9 @@ func driveUntilLeaderIn(t *testing.T, c *raftest.Cluster, minTerm raft.Term, max
 		c.AssertLogMatching()
 		c.AssertNoCommittedEntryLost()
 		for _, node := range group {
-			role, term := c.NodeByID(node).Node().RoleAndTerm()
-			if role == raft.Leader && term > minTerm {
-				return node, term
+			s := c.NodeByID(node).Node().Status()
+			if s.Role == raft.Leader && s.Term > minTerm {
+				return node, s.Term
 			}
 		}
 	}
@@ -130,9 +142,17 @@ func driveTicks(t *testing.T, c *raftest.Cluster, n int) {
 // cluster-wide first-leader scan could route the proposal into the wrong,
 // crashed node. The Figure 8 script must inject each entry into the leader
 // of the currently-connected group.
+//
+// 07-04: routes through Cluster.ProposeIntoForTest — the index-pinned seam
+// over the public raft.Node.Propose. It returns the leader's ASSIGNED INDEX
+// at local-append time WITHOUT blocking on apply, so the non-committing
+// isolated-leader stages (a/b/c) — which propose old-term entries that never
+// commit — do not hang (the underlying Propose goroutine is bound to the
+// cluster ctx and reaped at Close). The (!ok -> Fatalf) refusal semantics are
+// preserved exactly.
 func proposeInto(t *testing.T, c *raftest.Cluster, stage string, leader raft.NodeID, op string) raft.Index {
 	t.Helper()
-	idx, ok := c.NodeByID(leader).Node().Propose([]byte(op))
+	idx, ok := c.ProposeIntoForTest(leader, []byte(op))
 	if !ok {
 		t.Fatalf("Figure8 (%s): Propose(%q) into %s refused — not leader (seed=%d)",
 			stage, op, leader, c.Seed)
@@ -141,18 +161,19 @@ func proposeInto(t *testing.T, c *raftest.Cluster, stage string, leader raft.Nod
 }
 
 // logTermAt returns the term of the entry at 1-based index idx on node,
-// or 0 if the node's log is shorter than idx.
+// or 0 if the node's log is shorter than idx. Reads the durable Storage
+// mirror via Cluster.LogOf (R-4 LOCKED; ADR-0011).
 func logTermAt(c *raftest.Cluster, node raft.NodeID, idx raft.Index) raft.Term {
-	entries := c.NodeByID(node).Node().Log()
+	entries := c.LogOf(node)
 	if int(idx) > len(entries) {
 		return 0
 	}
 	return entries[idx-1].Term
 }
 
-// commitIndexOf returns node's reported commitIndex.
+// commitIndexOf returns node's reported commitIndex via the public Status.
 func commitIndexOf(c *raftest.Cluster, node raft.NodeID) raft.Index {
-	return c.NodeByID(node).Node().CommitIndex()
+	return c.NodeByID(node).Node().Status().CommitIndex
 }
 
 // TestFigure8 reproduces the canonical 5-node §5.4.2 scenario and proves
@@ -227,18 +248,18 @@ func TestFigure8(t *testing.T) {
 	// the first-election value still holds. (This was the residual seed-12345
 	// -race flake: index-2 landed at the re-elected term, not the captured one.)
 	for range 400 {
-		role, term := c.NodeByID(leaderA).Node().RoleAndTerm()
-		if role == raft.Leader && term >= termA {
-			termA = term
+		s := c.NodeByID(leaderA).Node().Status()
+		if s.Role == raft.Leader && s.Term >= termA {
+			termA = s.Term
 			break
 		}
 		c.Tick(10 * time.Millisecond)
 		c.AssertLogMatching()
 		c.AssertNoCommittedEntryLost()
 	}
-	if role, term := c.NodeByID(leaderA).Node().RoleAndTerm(); role != raft.Leader {
+	if s := c.NodeByID(leaderA).Node().Status(); s.Role != raft.Leader {
 		t.Fatalf("Figure8 (a): leaderA=%s lost leadership before index-2 (role=%v term=%d) (seed=%d)",
-			leaderA, role, term, c.Seed)
+			leaderA, s.Role, s.Term, c.Seed)
 	}
 
 	idx2 := proposeInto(t, c, "a/idx2", leaderA, "a-idx2-oldterm")

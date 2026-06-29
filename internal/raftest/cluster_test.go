@@ -1,59 +1,46 @@
 package raftest_test
 
 import (
-	"reflect"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/anishathalye/porcupine"
+	"github.com/prajwalmahajan101/toyraft/internal/clock"
 	"github.com/prajwalmahajan101/toyraft/internal/raftest"
 )
 
-// TestCluster_TwoRunsByteIdentical proves SC5: the same int64 seed
-// produces a byte-identical []HistoryEvent across two independent runs.
-// This is the load-bearing determinism guarantee for the entire Phase 4
-// harness.
-func TestCluster_TwoRunsByteIdentical(t *testing.T) {
-	const seed = int64(0xC0FFEE)
-	h1 := runScenario(t, seed)
-	h2 := runScenario(t, seed)
-	if !reflect.DeepEqual(h1, h2) {
-		t.Fatalf("history diverged across runs at same seed:\nrun1=%v\nrun2=%v", h1, h2)
-	}
-	if len(h1) == 0 {
-		t.Fatalf("history is empty; scenario produced no events")
-	}
-}
+// 07-04 NOTE: the recorder-shim Cluster.Propose path is RETIRED in Phase 7
+// (STATE.md 06-05: "Recorder path retired in Phase 7"). The real client path
+// is now ProposeToLeader -> public raft.Node.Propose. With the synthetic
+// instant-apply shim gone, TestCluster_TwoRunsByteIdentical (which proved the
+// SHIM's byte-determinism) is retired with it. The harness determinism
+// contract is now carried by the FakeClock model itself (ADR-0006,
+// TestFake_* in internal/clock) plus the chaos suite's seed-pinned safety
+// assertions. TestRecorder_PorcupineImport is preserved but rewired to drive
+// the Recorder directly (BeginCall/EndCall) rather than through the shim, so
+// the porcupine WIRE-FORMAT pin survives the retirement.
 
-// runScenario drives a deterministic workload: 50 client operations
-// round-robin across a 3-node cluster, interleaved with 20ms ticks. The
-// scenario shape is intentionally simple — the determinism contract is
-// what we are testing, not consensus behaviour.
-func runScenario(t *testing.T, seed int64) []raftest.HistoryEvent {
-	t.Helper()
-	c := raftest.NewCluster(t, 3, seed)
-	for i := range 50 {
-		c.Propose(i%3, struct{ Kind, Key, Value string }{
-			Kind: "set", Key: "k", Value: strconv.Itoa(i),
-		})
-		c.Tick(20 * time.Millisecond)
-	}
-	return c.Recorder.Snapshot()
-}
-
-// TestRecorder_PorcupineImport proves SC6: HistoryEvent values flow
-// through ToPorcupine into porcupine.CheckOperations without a schema
-// mismatch. The model used here is intentionally trivial (always
-// linearizable) so the test pins the WIRE FORMAT only. Phase 12 brings
-// the real KV register model.
+// TestRecorder_PorcupineImport proves SC6: HistoryEvent values flow through
+// ToPorcupine into porcupine.CheckOperations without a schema mismatch. The
+// model used here is intentionally trivial (always linearizable) so the test
+// pins the WIRE FORMAT only. Phase 12 brings the real KV register model.
+//
+// History is produced by driving the Recorder directly — the retired
+// Cluster.Propose shim is no longer the writer.
 func TestRecorder_PorcupineImport(t *testing.T) {
-	c := raftest.NewCluster(t, 3, 1)
-	c.Propose(0, "set:k=1")
-	c.Tick(1 * time.Millisecond)
-	c.Propose(0, "set:k=2")
-	c.Tick(1 * time.Millisecond)
-	snap := c.Recorder.Snapshot()
+	clk := clock.NewFake()
+	rec := raftest.NewRecorder(clk)
+
+	call1 := rec.BeginCall(0, "set:k=1")
+	clk.Advance(1 * time.Millisecond)
+	rec.EndCall(0, call1, struct{ OK bool }{true})
+	clk.Advance(1 * time.Millisecond)
+	call2 := rec.BeginCall(0, "set:k=2")
+	clk.Advance(1 * time.Millisecond)
+	rec.EndCall(0, call2, struct{ OK bool }{true})
+
+	snap := rec.Snapshot()
 	ops := raftest.ToPorcupine(snap)
 
 	if len(ops) != len(snap) {
@@ -99,11 +86,10 @@ func TestCluster_OddNRequired(t *testing.T) {
 func TestCluster_NodeIDsZeroPadded(t *testing.T) {
 	c := raftest.NewCluster(t, 11, 1)
 
-	// Drive a propose against each node to confirm indices 0..10 are
-	// reachable without panic. Then tick to let the noopNode drain.
-	for i := range 11 {
-		c.Propose(i, "ping")
-	}
+	// Tick once to confirm the 11-node own-driver cluster spins up without
+	// panic (every node Start'd, FakeClock ticker registered). The retired
+	// Cluster.Propose shim is gone; this test pins the ID ENCODING, not
+	// propose routing, so no proposal is needed.
 	c.Tick(1 * time.Millisecond)
 
 	want := []string{"n00", "n01", "n02", "n03", "n04", "n05", "n06", "n07", "n08", "n09", "n10"}

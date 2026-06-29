@@ -8,13 +8,18 @@ import (
 // election-timeout path to promote it to Candidate, then feeds enough
 // vote grants to reach quorum and flip to Leader. It drains the Ready()
 // buffer (the becomeCandidate fan-out + becomeLeader immediate heartbeat
-// round) and returns the *node plus a TestNode wrapper for the SC5
-// inspectors.
+// round) and returns the *node.
+//
+// 07-04 NOTE: this previously also returned a &TestNode{n:n} wrapper for the
+// nextIndex/matchIndex/commitIndex inspectors. TestNode is deleted in Phase
+// 7; since these tests are `package raft` (internal), callers read
+// n.nextIndex / n.matchIndex / n.commitIndex directly under n.mu — no
+// exported surface needed.
 //
 // The peers slice MUST contain id at index 0 (makeElectionConfig uses
 // peers[0]-style ids). Seed 42 pins the per-node RNG draw inside the
 // [3,6)-tick window deterministically (P1-4).
-func driveToLeader(t *testing.T, id NodeID, peers []NodeID) (*node, *TestNode) {
+func driveToLeader(t *testing.T, id NodeID, peers []NodeID) *node {
 	t.Helper()
 	cfg := makeElectionConfig(t, id, peers, 42)
 	n := mustNewNode(t, cfg)
@@ -55,7 +60,19 @@ func driveToLeader(t *testing.T, id NodeID, peers []NodeID) (*node, *TestNode) {
 	}
 	// Drain the becomeCandidate fan-out + becomeLeader immediate heartbeat.
 	n.Ready()
-	return n, &TestNode{n: n}
+	return n
+}
+
+// snapshotIndexMap clones a NodeID->Index map under n.mu so callers read a
+// stable copy (the old TestNode.NextIndex/MatchIndex accessors did the same).
+func snapshotIndexMap(n *node, m map[NodeID]Index) map[NodeID]Index {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	out := make(map[NodeID]Index, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 // countAppendEntriesPerPeer drains Ready() once and tallies the
@@ -84,7 +101,7 @@ func countAppendEntriesPerPeer(msgs []Message) (perPeer map[NodeID]int, heartbea
 func TestHeartbeatCadence(t *testing.T) {
 	t.Parallel()
 	peers := []NodeID{"n1", "n2", "n3"}
-	n, _ := driveToLeader(t, "n1", peers)
+	n := driveToLeader(t, "n1", peers)
 
 	// One ElectionTimeoutMin window in ticks. tickInterval()==HeartbeatInterval,
 	// so this is ElectionTimeoutMin/HeartbeatInterval == 150/50 == 3.
@@ -133,15 +150,16 @@ func TestHeartbeatCadence(t *testing.T) {
 // TestNewLeaderInit — SC5 / REPL-05. On becoming leader, nextIndex[peer]
 // must equal log.LastIndex()+1 and matchIndex[peer] must be 0 for every
 // peer (including self — becomeLeaderLocked sets the uniform map shape).
-// Asserted through the widened TestNode inspectors.
+// Asserted by reading n.nextIndex / n.matchIndex directly (internal-package
+// test; the old TestNode inspectors are deleted in Phase 7).
 func TestNewLeaderInit(t *testing.T) {
 	t.Parallel()
 	peers := []NodeID{"n1", "n2", "n3", "n4", "n5"}
-	n, tn := driveToLeader(t, "n1", peers)
+	n := driveToLeader(t, "n1", peers)
 
 	wantNext := n.log.LastIndex() + 1
-	next := tn.NextIndex()
-	match := tn.MatchIndex()
+	next := snapshotIndexMap(n, n.nextIndex)
+	match := snapshotIndexMap(n, n.matchIndex)
 	for _, peer := range peers {
 		if got := next[peer]; got != wantNext {
 			t.Errorf("nextIndex[%s]=%d; want %d (REPL-05)", peer, got, wantNext)
@@ -160,9 +178,9 @@ func TestNewLeaderInit(t *testing.T) {
 func TestFreshLeaderDoesNotCommit(t *testing.T) {
 	t.Parallel()
 	peers := []NodeID{"n1", "n2", "n3"}
-	n, tn := driveToLeader(t, "n1", peers)
+	n := driveToLeader(t, "n1", peers)
 
-	if got := tn.CommitIndex(); got != 0 {
+	if got := commitIndexUnderLock(n); got != 0 {
 		t.Fatalf("fresh leader commitIndex=%d before any replication; want 0 (P1-2)", got)
 	}
 	// Tick several times (heartbeats only, no responses) — still no commit.
@@ -172,7 +190,15 @@ func TestFreshLeaderDoesNotCommit(t *testing.T) {
 		}
 		n.Ready()
 	}
-	if got := tn.CommitIndex(); got != 0 {
+	if got := commitIndexUnderLock(n); got != 0 {
 		t.Fatalf("commitIndex=%d after %d ticks with no AE responses; want 0 (P1-2)", got, 5)
 	}
+}
+
+// commitIndexUnderLock reads n.commitIndex under n.mu (the old
+// TestNode.CommitIndex accessor's behaviour; internal-package read seam).
+func commitIndexUnderLock(n *node) Index {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.commitIndex
 }
