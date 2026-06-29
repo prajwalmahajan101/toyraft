@@ -189,12 +189,16 @@ func TestFigure8(t *testing.T) {
 	}
 
 	// index-1: replicate + commit across all five nodes (shared baseline).
+	// Propose into leaderA's LIVE term (it may have re-elected at a higher term
+	// since the first election); the baseline check below compares against the
+	// term index-1 actually landed at on leaderA, not the captured first term.
 	proposeInto(t, c, "a/idx1", leaderA, "a-idx1")
 	driveTicks(t, c, 15)
+	baseTerm := logTermAt(c, leaderA, 1)
 	for _, node := range allNodes {
-		if logTermAt(c, node, 1) != termA {
+		if logTermAt(c, node, 1) != baseTerm {
 			t.Fatalf("Figure8 (a): node %s missing baseline index-1 (term %d); got %d (seed=%d)",
-				node, termA, logTermAt(c, node, 1), c.Seed)
+				node, baseTerm, logTermAt(c, node, 1), c.Seed)
 		}
 	}
 
@@ -210,9 +214,33 @@ func TestFigure8(t *testing.T) {
 
 	// Shrink to {leaderA, keep}: a 2-node minority of 5. index-2 will be
 	// appended to leaderA's log and replicated only to `keep` — never a
-	// quorum — so it CANNOT commit during term A. leaderA stays leader
-	// (it does not hear from a higher term while partitioned this briefly).
+	// quorum — so it CANNOT commit during term A.
 	connectOnly(c, leaderA, keep)
+
+	// Re-bind termA to leaderA's LIVE term at the instant it appends index-2.
+	// Between the first election and this point, RNG-driven timeouts can
+	// re-elect leaderA at a higher term (it still reports Role=Leader, just at
+	// a newer term), so the term captured at the first election may be stale.
+	// The Figure 8 shape only needs index-2 to carry leaderA's OWN term as the
+	// "old term" that stages (b)/(c) then beat with strictly-higher termB/termC
+	// — so we discover that old term from leaderA itself rather than assuming
+	// the first-election value still holds. (This was the residual seed-12345
+	// -race flake: index-2 landed at the re-elected term, not the captured one.)
+	for range 400 {
+		role, term := c.NodeByID(leaderA).Node().RoleAndTerm()
+		if role == raft.Leader && term >= termA {
+			termA = term
+			break
+		}
+		c.Tick(10 * time.Millisecond)
+		c.AssertLogMatching()
+		c.AssertNoCommittedEntryLost()
+	}
+	if role, term := c.NodeByID(leaderA).Node().RoleAndTerm(); role != raft.Leader {
+		t.Fatalf("Figure8 (a): leaderA=%s lost leadership before index-2 (role=%v term=%d) (seed=%d)",
+			leaderA, role, term, c.Seed)
+	}
+
 	idx2 := proposeInto(t, c, "a/idx2", leaderA, "a-idx2-oldterm")
 	if idx2 != 2 {
 		t.Fatalf("Figure8 (a): index-2 entry assigned index %d; want 2 (seed=%d)", idx2, c.Seed)
