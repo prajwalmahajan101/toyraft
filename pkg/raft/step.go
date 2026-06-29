@@ -43,19 +43,14 @@ func (n *node) stepLocked(m Message) error {
 	return nil
 }
 
-// Per-role handler skeletons. Each MUST be declared so stepLocked's
-// switch is exhaustive at compile time and so plans could land
-// independently in parallel without crashing each other's tests.
-//
-// tickLeaderLocked (the leader heartbeat/append fan-out, REPL-01) is now
-// REAL — it lives in pkg/raft/leader.go (06-01). handleAppendEntriesRespLocked
-// remains a no-op stub until plan 06-03 wires per-peer progress + the
-// commit rule.
-// tickCandidateLocked + handleRequestVoteResponseLocked: 05-03 (candidate.go).
-// tickFollowerLocked + handleRequestVoteLocked + handleAppendEntriesLocked:
-// 05-02 / 06-02 (follower.go / append_entries.go).
-// becomeCandidateLocked / becomeLeaderLocked: candidate.go / leader_stub.go.
-func (n *node) handleAppendEntriesRespLocked(Message) { /* TODO(Phase 6 — 06-03) */ }
+// Per-role handler homes (all REAL — no Phase-6 stubs remain):
+//   - tickLeaderLocked + sendAppendEntriesLocked + proposeLocked +
+//     handleAppendEntriesRespLocked: pkg/raft/leader.go (06-01 / 06-03).
+//   - maybeAdvanceCommitLocked (current-term commit rule): commit.go (06-03).
+//   - tickCandidateLocked + handleRequestVoteResponseLocked: candidate.go (05-03).
+//   - tickFollowerLocked + handleRequestVoteLocked: follower.go (05-02).
+//   - handleAppendEntriesLocked (real receiver): append_entries.go (06-02).
+//   - becomeCandidateLocked / becomeLeaderLocked: candidate.go / leader_stub.go.
 
 // queueMsgLocked attaches the current stepDownEpoch to an outbound
 // Message and appends it to the Ready() drain buffer. The epoch token
