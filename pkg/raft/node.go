@@ -55,6 +55,16 @@ type node struct {
 	electionTimeout int
 	electionElapsed int
 
+	// Heartbeat timing (tick-domain, leader-only). Mirror of the election
+	// timing block above. heartbeatElapsed is the running tick counter
+	// tickLeaderLocked compares against heartbeatTimeout; on reaching it the
+	// leader fans out one AppendEntries per peer (REPL-01). Both are set on
+	// becomeLeaderLocked and meaningless in follower/candidate phases.
+	// heartbeatTimeout is 1 tick by default: tickInterval()==HeartbeatInterval,
+	// so the driver's tick cadence IS the heartbeat cadence (RESEARCH Pattern 1).
+	heartbeatElapsed int
+	heartbeatTimeout int
+
 	// stepDownEpoch is the TOCTOU-prevention token (ELEC-08 / P0-5). It
 	// monotonically increments every time maybeStepDownLocked promotes a
 	// higher term, allowing Ready() to discard outbound messages queued

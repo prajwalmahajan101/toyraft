@@ -44,23 +44,18 @@ func (n *node) stepLocked(m Message) error {
 }
 
 // Per-role handler skeletons. Each MUST be declared so stepLocked's
-// switch is exhaustive at compile time and so plans 05-02 / 05-03 /
-// Phase 6 can land independently in parallel without crashing each
-// other's tests. Bodies are no-ops; the TODO comments name the plan
-// that fills each.
+// switch is exhaustive at compile time and so plans could land
+// independently in parallel without crashing each other's tests.
 //
-// Leader-role handlers (tickLeaderLocked, handleAppendEntriesRespLocked)
-// are not exercised by any Phase 5 test path — becomeLeader (05-03)
-// transitions to Leader but only after wiring its own tick loop and
-// outbound AE pipeline lands in Phase 6.
-// tickCandidateLocked + handleRequestVoteResponseLocked: filled by 05-03
-// in pkg/raft/candidate.go.
+// tickLeaderLocked (the leader heartbeat/append fan-out, REPL-01) is now
+// REAL — it lives in pkg/raft/leader.go (06-01). handleAppendEntriesRespLocked
+// remains a no-op stub until plan 06-03 wires per-peer progress + the
+// commit rule.
+// tickCandidateLocked + handleRequestVoteResponseLocked: 05-03 (candidate.go).
 // tickFollowerLocked + handleRequestVoteLocked + handleAppendEntriesLocked:
-// filled by 05-02 in pkg/raft/follower.go.
-// becomeCandidateLocked / becomeLeaderLocked: filled by 05-03 in
-// pkg/raft/candidate.go and pkg/raft/leader_stub.go.
-func (n *node) tickLeaderLocked()                     { /* TODO(Phase 6 — leader.go) */ }
-func (n *node) handleAppendEntriesRespLocked(Message) { /* TODO(Phase 6) */ }
+// 05-02 / 06-02 (follower.go / append_entries.go).
+// becomeCandidateLocked / becomeLeaderLocked: candidate.go / leader_stub.go.
+func (n *node) handleAppendEntriesRespLocked(Message) { /* TODO(Phase 6 — 06-03) */ }
 
 // queueMsgLocked attaches the current stepDownEpoch to an outbound
 // Message and appends it to the Ready() drain buffer. The epoch token
