@@ -62,9 +62,26 @@ func (n *node) handleAppendEntriesLocked(m Message) {
 		if firstConflict <= n.log.LastIndex() {
 			assertTruncateAboveCommit(firstConflict, n.commitIndex)
 		}
-		// Storage mirror added in 06-04 (P0-4 final).
+		suffix := entriesFrom(m.Entries, firstConflict)
 		n.log.TruncateSuffix(firstConflict)
-		n.log.Append(entriesFrom(m.Entries, firstConflict)...)
+		n.log.Append(suffix...)
+		// RATIFIED decision 2 (P0-4 final / REPL-09): mirror the truncate
+		// + append into the durable local Storage subset. CRITICAL
+		// ORDERING — this MUST complete BEFORE replyAppendEntriesLocked
+		// queues the Success response that claims these entries, so the
+		// follower never advertises a MatchIndex it has not persisted.
+		// On a mirror failure we MUST NOT reply Success: reply
+		// Success=false so the leader re-probes, and surface the error
+		// (global rule: no failure-hiding fallback). n.log keeps the
+		// in-memory copy; the next AE round re-converges once Storage
+		// recovers. The pkg/raft.Storage vs pkg/storage.Storage
+		// duplication is NOT reconciled here (Phase 7 ADR).
+		if err := n.mirrorLogWriteLocked(firstConflict, suffix); err != nil {
+			n.log2.Error("raft: AppendEntries storage mirror failed",
+				"firstConflict", firstConflict, "from", m.From, "err", err)
+			n.replyAppendEntriesLocked(m.From, false, 0)
+			return
+		}
 	}
 
 	// Figure-2 receiver step 5: advance commitIndex. The last new entry
@@ -78,6 +95,32 @@ func (n *node) handleAppendEntriesLocked(m Message) {
 	}
 
 	n.replyAppendEntriesLocked(m.From, true, n.log.LastIndex())
+}
+
+// mirrorLogWriteLocked persists a follower-side truncate+append into the
+// durable local Storage subset, mirroring the in-memory n.log mutation
+// just performed. Caller holds n.mu. (RATIFIED decision 2 / P0-4 final /
+// REPL-09.)
+//
+// The Storage call order matches the n.log order: TruncateSuffix(from)
+// then Append(suffix). memory.Storage.TruncateSuffix is a no-op when
+// from > LastIndex() (a pure append never truncates), and Append requires
+// the suffix to start at the new LastIndex()+1 — which holds because the
+// mirror tracks n.log in lockstep on every write. An empty suffix Append
+// is a no-op (memory.Storage returns nil).
+//
+// Returns the first error from either Storage call so the caller can
+// decline to advertise durability it has not achieved. The error is NOT
+// swallowed; the in-memory n.log is left as-is (the next AE round
+// re-converges once Storage recovers).
+func (n *node) mirrorLogWriteLocked(from Index, suffix []Entry) error {
+	if err := n.storage.TruncateSuffix(from); err != nil {
+		return fmt.Errorf("raft: mirror truncate at %d: %w", from, err)
+	}
+	if err := n.storage.Append(suffix); err != nil {
+		return fmt.Errorf("raft: mirror append from %d: %w", from, err)
+	}
+	return nil
 }
 
 // replyAppendEntriesLocked queues an AppendEntries response. Caller
