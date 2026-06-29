@@ -44,6 +44,15 @@ func (n *node) maybeAdvanceCommitLocked() {
 	}
 	slices.Sort(matches)
 
+	// Guard: matchIndex must be populated for a full peer set (normally by
+	// becomeLeaderLocked) before a quorum index is well-defined. If fewer than
+	// quorum() peers are tracked (e.g. a test that forces role=Leader without
+	// the leader-state init, or a transient mid-transition state), there is no
+	// quorum to commit and matches[len-quorum] would index out of range.
+	if n.quorum() > len(matches) {
+		return
+	}
+
 	quorumIndex := matches[len(matches)-n.quorum()]
 	if quorumIndex <= n.commitIndex {
 		return

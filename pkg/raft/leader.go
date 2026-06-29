@@ -35,6 +35,14 @@ func (n *node) tickLeaderLocked() {
 		}
 		n.sendAppendEntriesLocked(peer)
 	}
+	// Self-quorum commit advance: re-run the commit rule each heartbeat so a
+	// leader whose OWN log now forms a quorum advances commitIndex without
+	// needing a follower response. This is the only commit path for an N=1
+	// cluster (no peers ever reply); for N>=3 it is a no-op unless the stored
+	// matchIndex snapshot already justifies a higher commit, and
+	// maybeAdvanceCommitLocked enforces the current-term Figure-8 guard
+	// (REPL-06), so multi-node safety is unchanged.
+	n.maybeAdvanceCommitLocked()
 }
 
 // sendAppendEntriesLocked builds and queues one MsgAppendEntries for peer

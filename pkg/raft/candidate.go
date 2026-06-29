@@ -45,6 +45,16 @@ func (n *node) becomeCandidateLocked() {
 			LastLogTerm:  n.log.LastTerm(),
 		})
 	}
+
+	// Single-node fast path (ELEC-04): the self-vote may ALREADY be a quorum.
+	// For an N=1 cluster quorum()==1 and votesReceived=={self}, so the
+	// candidate wins its own election immediately — there are no peers to
+	// solicit a vote from, and without this check the node would re-elect on
+	// every timeout and never lead. For N>=3 a lone self-vote is never a
+	// majority, so this is a no-op and multi-node behaviour is unchanged.
+	if len(n.votesReceived) >= n.quorum() {
+		n.becomeLeaderLocked()
+	}
 }
 
 // tickCandidateLocked implements Pitfall 4 — a candidate that does not
