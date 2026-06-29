@@ -199,14 +199,14 @@ func (n *nodeImpl) LeaderHint() NodeID {
 	return n.core.leaderHint
 }
 
-// Step is the inbound RPC entry point. It guards against a stopped node, then
-// honours ctx cancellation at the handoff boundary before delegating to the
-// ctx-free internal core (R-6: the core never sees ctx; ctx is used only to
-// drop a message whose caller has already cancelled).
+// Step is the inbound RPC entry point (R-6). It guards against a stopped node,
+// honours ctx cancellation at the handoff boundary, then delegates to the
+// ctx-free internal core. The core MUST NOT see ctx (Global Invariant: Step
+// MUST NOT block on I/O); ctx is used ONLY to drop a message whose caller has
+// already cancelled, before it reaches the lock-acquiring core.Step.
 //
-// 07-03 completes this: the real driver routes Step through the inbound queue
-// rather than calling the core synchronously. For 07-02 the direct delegation
-// is correct-but-incomplete and satisfies the interface + Transport.Register.
+// The core serialises every caller on n.core.mu (node.go Step), so Step is safe
+// to call concurrently from the Transport's inbound goroutine(s).
 func (n *nodeImpl) Step(ctx context.Context, msg Message) error {
 	if n.stopped.Load() {
 		return ErrStopped
@@ -216,7 +216,7 @@ func (n *nodeImpl) Step(ctx context.Context, msg Message) error {
 		return ctx.Err()
 	default:
 	}
-	return n.core.Step(msg) // 07-03 completes this (inbound-queue handoff)
+	return n.core.Step(msg)
 }
 
 // Propose submits a command for replication.
@@ -291,25 +291,10 @@ func (n *nodeImpl) Stop() error {
 	return n.stopErr // all callers observe the same result (Global Invariant 3)
 }
 
-// runTicker is the leader heartbeat / election tick loop.
-//
-// 07-03 replaces this placeholder body with the real driver tick loop (it will
-// drive node.Step(MsgTick) at the configured cadence and pump Ready()). For
-// 07-02 it simply blocks until the root context is cancelled, then exits — this
-// makes Start/Stop fully goleak-clean in isolation.
-func (n *nodeImpl) runTicker(ctx context.Context) {
-	defer n.wg.Done()
-	<-ctx.Done() // 07-03 replaces this placeholder body
-}
-
-// runInbound is the transport inbound-dispatch loop.
-//
-// 07-03 replaces this placeholder body with the real inbound queue drain. For
-// 07-02 it blocks until the root context is cancelled, then exits.
-func (n *nodeImpl) runInbound(ctx context.Context) {
-	defer n.wg.Done()
-	<-ctx.Done() // 07-03 replaces this placeholder body
-}
+// runTicker (driver.go) and runInbound (driver.go) supply the real tick loop
+// and inbound seam. They were the 07-02 placeholders here; 07-03 promoted the
+// real bodies into driver.go alongside the commit->apply enqueue seam and the
+// inproc Transport adapter.
 
 // runApply is the single-goroutine apply loop that drains applyCh and calls
 // StateMachine.Apply in index order (LLD §5 invariant 4), advancing appliedIdx
