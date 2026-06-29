@@ -2,100 +2,49 @@ package raftest_test
 
 import (
 	"testing"
-	"time"
-
-	"context"
 
 	"github.com/prajwalmahajan101/toyraft/internal/raftest"
 	"github.com/prajwalmahajan101/toyraft/pkg/raft"
 	"github.com/prajwalmahajan101/toyraft/pkg/storage/memory"
 )
 
-// nopTransport / nopSM satisfy Config.Validate's nil-Transport /
-// nil-StateMachine rules (R-2) for these raftest-side ordering tests.
-// They do nothing; 07-04 replaces the raftest path with the real inproc
-// adapter + recordingSM.
-type nopTransport struct{}
-
-func (nopTransport) Send(context.Context, raft.Message) error                   { return nil }
-func (nopTransport) Register(func(ctx context.Context, msg raft.Message) error) {}
-func (nopTransport) Close() error                                               { return nil }
-
-type nopSM struct{}
-
-func (nopSM) Apply(raft.Entry) (any, error)         { return nil, nil }
-func (nopSM) Snapshot() ([]byte, raft.Index, error) { return nil, 0, raft.ErrSnapshotUnsupported }
-func (nopSM) Restore([]byte) error                  { return raft.ErrSnapshotUnsupported }
-
 // TestVotePersistsBeforeResponse — SC5 layer-3 (the assertion-enforced
-// proof). Drives a vote grant through the test driver pattern that
-// 05-05's Cluster.tickOnce will inherit:
+// proof), POSITIVE case. Records the correct driver sequence directly into
+// OrderingStorage — SaveHardState{Term=1, VotedFor=n2} BEFORE
+// Send(VoteGranted=true, Term=1, To=n2):
 //
-//	Step(RequestVote) -> Ready() -> SaveHardState(hs) -> RecordSend(m)
+//	SaveHardState(hs) -> RecordSend(grant)
 //
-// The OrderingStorage event log MUST show SaveHardState{Term=1,
-// VotedFor=n2} at a strictly lower seq than Send(VoteGranted=true,
-// Term=1, To=n2). AssertHardStatePrecedesVoteGrantedResponse panics
-// via t.Fatalf if not.
+// AssertHardStatePrecedesVoteGrantedResponse MUST pass.
+//
+// 07-04 NOTE: this previously drove a raft.TestNode's Step/Ready to GENERATE
+// the (hs, grant) pair. TestNode is deleted in Phase 7 (the public surface
+// has no Ready() drain seam), and the production driver's SaveHardState-
+// before-Send ordering is now proven by pkg/raft's own driver_test.go. This
+// test's job is narrower — it pins the OrderingStorage assertion itself — so
+// it records the canonical Save->Send pair directly (mirroring the negative
+// case in TestOrderingStorageDetectsViolation, opposite order).
 func TestVotePersistsBeforeResponse(t *testing.T) {
 	t.Parallel()
 
 	mem := memory.New()
 	ord := raftest.NewOrderingStorage(mem)
 
-	cfg := &raft.Config{
-		NodeID:             "n1",
-		Peers:              []raft.NodeID{"n1", "n2", "n3"},
-		ElectionTimeoutMin: 300 * time.Millisecond,
-		ElectionTimeoutMax: 600 * time.Millisecond,
-		HeartbeatInterval:  100 * time.Millisecond,
-		Seed:               42,
-		Storage:            ord,
-		Transport:          nopTransport{},
-		StateMachine:       nopSM{},
-	}
-	n, err := raft.NewTestNode(cfg)
-	if err != nil {
-		t.Fatalf("NewTestNode: %v", err)
-	}
-
-	// Inbound RequestVote at term 1 from n2 with an up-to-date log
-	// (the granter's log is empty, so any (LastLogTerm, LastLogIndex)
-	// satisfies §5.4.1).
-	if err := n.Step(raft.Message{
-		Type:         raft.MsgRequestVote,
-		Term:         1,
-		From:         "n2",
-		To:           "n1",
-		LastLogIndex: 0,
-		LastLogTerm:  0,
-	}); err != nil {
-		t.Fatalf("Step RequestVote: %v", err)
-	}
-
-	// Drain. Driver discipline (SC5 layer 1): persist hs BEFORE shipping.
-	msgs, hs := n.Ready()
-	if hs == nil {
-		t.Fatalf("Ready: hs nil; vote grant must queue HardState before response")
-	}
-	if hs.VotedFor != "n2" {
-		t.Fatalf("hs.VotedFor=%q, want %q", hs.VotedFor, raft.NodeID("n2"))
-	}
-	if err := ord.SaveHardState(*hs); err != nil {
+	// Correct order: persist the vote (Term=1, VotedFor=n2) BEFORE shipping
+	// the granted response to n2.
+	if err := ord.SaveHardState(raft.HardState{CurrentTerm: 1, VotedFor: "n2"}); err != nil {
 		t.Fatalf("SaveHardState: %v", err)
 	}
+	ord.RecordSend(raft.Message{
+		Type:        raft.MsgRequestVoteResponse,
+		Term:        1,
+		From:        "n1",
+		To:          "n2",
+		VoteGranted: true,
+	})
 
-	if len(msgs) != 1 {
-		t.Fatalf("Ready: len(msgs)=%d, want 1", len(msgs))
-	}
-	for _, m := range msgs {
-		ord.RecordSend(m)
-		// In production the driver would Send(m) here. The test does
-		// not need a transport — RecordSend alone proves the ordering.
-	}
-
-	// SC5 layer-3 assertion. Fails the test if the event log shows
-	// the grant response without a prior matching SaveHardState.
+	// SC5 layer-3 assertion. Fails the test if the event log shows the grant
+	// response without a prior matching SaveHardState.
 	ord.AssertHardStatePrecedesVoteGrantedResponse(t)
 }
 

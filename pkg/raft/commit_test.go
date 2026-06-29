@@ -18,7 +18,7 @@ import (
 // election's bookkeeping does not perturb index math.
 func newLeaderForCommit(t *testing.T, id NodeID, peers []NodeID) *node {
 	t.Helper()
-	n, _ := driveToLeader(t, id, peers)
+	n := driveToLeader(t, id, peers)
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	// Clear any election-era log + commit; tests script log/match from scratch.
