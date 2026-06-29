@@ -369,6 +369,23 @@ type StateMachine interface {
 > wraps `*node` and surfaces `Ready`, `RoleAndTerm`, and `ID` for
 > integration tests in `internal/raftest`; it will be deleted in Phase 7
 > when the proper `raft.New` constructor lands.
+>
+> **Phase 6 back-patch (2026-06-29).** Plan 06-04 made the local Storage
+> subset carry the **replicated log**, not just HardState (ADR-0011): the
+> leader (`proposeLocked`) and the `AppendEntries` receiver
+> (`mirrorLogWriteLocked`) now mirror every `Append` / `TruncateSuffix`
+> into the local `Storage` subset **in lockstep** with the in-memory
+> `n.log`, and the mirror completes **before** any outbound response that
+> claims those entries (REPL-09 / P0-4-final; see §5 invariant 1). `n.log`
+> remains the fast in-memory read path. The `pkg/raft.Storage` ↔
+> `pkg/storage.Storage` duplication is **unchanged** and still deferred to
+> the Phase 7 reconciliation ADR. Plan 06-01 also widened `raft.TestNode`
+> with `Propose` (REPL-02 test hook) and `Log` / `CommitIndex` /
+> `MatchIndex` / `NextIndex` inspectors — all deleted in Phase 7 with the
+> rest of `TestNode`. The §2 default timings (50 / 150 / 300 ms) were
+> already the documented contract; plan 06-01's `applyDefaults` alignment
+> was a **conformance fix** toward §2, not a contract change, so no RFC is
+> owed (PROC-03 not triggered).
 
 ```go
 // Storage composes log and hard-state persistence. Implementations live in
@@ -576,7 +593,7 @@ var (
 
 These cross-cutting rules bind every implementation in `pkg/raft` and its plug-ins. Violating any of these is a review-blocking finding.
 
-1. **fsync ordering (REPL-09).** A node MUST NOT emit an outbound RPC whose correctness depends on `HardState` (RequestVote, vote-granting RequestVoteResponse, AppendEntries from a new leader) until the corresponding `HardState` has been durably persisted via `Storage.SaveHardState`. The driver enforces this between core emission and Transport.Send.
+1. **fsync ordering (REPL-09).** A node MUST NOT emit an outbound RPC whose correctness depends on durable state until that state has been persisted. This binds two cases: (a) **HardState** — RequestVote, vote-granting RequestVoteResponse, and AppendEntries from a new leader wait on `Storage.SaveHardState`; the driver enforces this between core emission and Transport.Send. (b) **Log entries (P0-4-final, Phase 6 / ADR-0011)** — a `Success` `AppendEntriesResponse` (which advertises a `MatchIndex`), and a leader marking a proposed entry locally replicated, MUST wait until the entry has been mirrored into `Storage.Append`. The leader's `proposeLocked` and the receiver's `mirrorLogWriteLocked` complete the `Storage` write inside `Step` BEFORE the dependent response is queued; on mirror failure the node declines durability (leader returns `(0,false)`, follower replies `Success=false`) rather than advertising an unpersisted entry. Proven by `OrderingStorage.AssertAppendPrecedesAppendEntriesResponse` and the raftdebug `assertAppendPrecedesAEResponseLocked` invariant.
 
 2. **Zero-value safety (FOUND-05).** Every exported function on a zero-value receiver of an exported type either does something useful or panics with a message that names the offending field (e.g. `"raft.Node: zero-value Node; construct via raft.New"`). Silent zero-value misuse is a bug.
 

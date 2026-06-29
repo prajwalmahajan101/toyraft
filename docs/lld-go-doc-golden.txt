@@ -54,13 +54,14 @@ type Config struct {
 
 	// ElectionTimeoutMin / ElectionTimeoutMax bracket the randomised
 	// election timeout draw (Raft §5.2). Min < Max strictly. Defaults:
-	// 300ms / 600ms.
+	// 150ms / 300ms (LLD §2; RATIFIED decision 1 — see applyDefaults).
 	ElectionTimeoutMin time.Duration
 	ElectionTimeoutMax time.Duration
 
 	// HeartbeatInterval is the leader's heartbeat cadence. P1-5 requires
 	// HeartbeatInterval*3 <= ElectionTimeoutMin so a single dropped
-	// heartbeat does not provoke an election. Default: 100ms.
+	// heartbeat does not provoke an election. Default: 50ms (REPL-01 /
+	// LLD §2; RATIFIED decision 1 — see applyDefaults).
 	HeartbeatInterval time.Duration
 
 	// Seed deterministically seeds the per-node math/rand/v2 RNG that
@@ -318,9 +319,30 @@ func NewTestNode(cfg *Config) (*TestNode, error)
     Returns the validation / storage error path of newNode unchanged so the test
     driver can assert on construction failure modes.
 
+func (t *TestNode) CommitIndex() Index
+    CommitIndex returns the wrapped node's commitIndex under n.mu.
+
 func (t *TestNode) ID() NodeID
     ID returns the configured NodeID. Stable for the lifetime of the node;
     safe to call without locking.
+
+func (t *TestNode) Log() []Entry
+    Log returns a deep copy of the wrapped node's replicated log entries under
+    n.mu. The copy is owned by the caller; subsequent log mutation does not
+    alias it.
+
+func (t *TestNode) MatchIndex() map[NodeID]Index
+    MatchIndex returns a clone of the wrapped node's matchIndex map under n.mu.
+    The clone is owned by the caller.
+
+func (t *TestNode) NextIndex() map[NodeID]Index
+    NextIndex returns a clone of the wrapped node's nextIndex map under n.mu.
+    The clone is owned by the caller.
+
+func (t *TestNode) Propose(data []byte) (Index, bool)
+    Propose injects a client proposal into the wrapped node under n.mu and
+    returns (assignedIndex, true) on a leader, or (0, false) otherwise
+    (REPL-02). Phase-6 test hook; deleted in Phase 7 with the rest of TestNode.
 
 func (t *TestNode) Ready() (msgs []Message, hs *HardState)
     Ready delegates to the wrapped *node.Ready. See pkg/raft/ready.go package
