@@ -22,7 +22,7 @@ func findResponseTo(t *testing.T, n *node, target NodeID) Message {
 // install leaderHint as the FIRST action.
 func TestFollowerHeartbeatResetsTimer(t *testing.T) {
 	t.Parallel()
-	n := newStartedNode(t, []NodeID{"n1", "n2"})
+	n := newStartedNode(t, []NodeID{"n1", "n2", "n3"})
 	n.currentTerm = 4
 	n.electionElapsed = 5
 	n.leaderHint = ""
@@ -51,7 +51,7 @@ func TestFollowerHeartbeatResetsTimer(t *testing.T) {
 // arms once handleAppendEntriesLocked grows the log body.
 func TestFollowerRejectedAppendEntriesStillResetsTimerWhenTermMatches(t *testing.T) {
 	t.Parallel()
-	n := newStartedNode(t, []NodeID{"n1", "n2"})
+	n := newStartedNode(t, []NodeID{"n1", "n2", "n3"})
 	n.currentTerm = 7
 	n.electionElapsed = 9
 
@@ -77,7 +77,7 @@ func TestFollowerRejectedAppendEntriesStillResetsTimerWhenTermMatches(t *testing
 // rejected (Success=false), and MUST NOT reset the election timer.
 func TestFollowerStaleAppendEntriesDoesNotResetTimer(t *testing.T) {
 	t.Parallel()
-	n := newStartedNode(t, []NodeID{"n1", "n2"})
+	n := newStartedNode(t, []NodeID{"n1", "n2", "n3"})
 	n.currentTerm = 7
 	n.electionElapsed = 5
 
@@ -149,7 +149,7 @@ func TestFollowerVoteDeniedWhenAlreadyVoted(t *testing.T) {
 // the voter's. Voter's last log term is 5; candidate's is 4 — denied.
 func TestFollowerVoteDeniedWhenLogStale(t *testing.T) {
 	t.Parallel()
-	n := newStartedNode(t, []NodeID{"n1", "node-b"})
+	n := newStartedNode(t, []NodeID{"n1", "node-b", "node-c"})
 	n.currentTerm = 5
 	n.votedFor = ""
 	n.log.Append(Entry{Term: 5, Index: 1})
@@ -182,7 +182,7 @@ func TestFollowerVoteDeniedWhenLogStale(t *testing.T) {
 // driver honour the invariant.
 func TestFollowerVoteGrantedQueuesHardStateBeforeResponse(t *testing.T) {
 	t.Parallel()
-	n := newStartedNode(t, []NodeID{"n1", "node-b"})
+	n := newStartedNode(t, []NodeID{"n1", "node-b", "node-c"})
 	n.currentTerm = 5
 	n.votedFor = ""
 	// Empty log on voter; candidate's (LastLogTerm=5, LastLogIndex=1) is
@@ -222,7 +222,7 @@ func TestFollowerVoteGrantedQueuesHardStateBeforeResponse(t *testing.T) {
 // supported.
 func TestFollowerVoteGrantedResetsElectionTimer(t *testing.T) {
 	t.Parallel()
-	n := newStartedNode(t, []NodeID{"n1", "node-b"})
+	n := newStartedNode(t, []NodeID{"n1", "node-b", "node-c"})
 	n.currentTerm = 5
 	n.votedFor = ""
 	n.electionElapsed = 9

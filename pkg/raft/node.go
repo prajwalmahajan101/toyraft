@@ -134,7 +134,7 @@ func newNode(cfg *Config) (*node, error) {
 	peers := slices.Clone(cfg.Peers)
 	slices.Sort(peers)
 	n := &node{
-		id:         cfg.ID,
+		id:         cfg.NodeID,
 		peers:      peers,
 		role:       Follower,
 		log:        &Log{},
@@ -154,7 +154,7 @@ func newNode(cfg *Config) (*node, error) {
 	n.currentTerm = hs.CurrentTerm
 	n.votedFor = hs.VotedFor
 	n.commitIndex = hs.Commit
-	n.rng = newNodeRNG(cfg.Seed, cfg.ID, cfg.Clock)
+	n.rng = newNodeRNG(cfg.Seed, cfg.NodeID, cfg.Clock)
 	// resetElectionTimeoutLocked lives in follower.go; Go allows
 	// forward references within a package.
 	n.resetElectionTimeoutLocked()

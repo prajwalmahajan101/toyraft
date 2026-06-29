@@ -36,11 +36,12 @@ type Storage interface {
 
 // Config carries the construction-time parameters of a Raft node.
 //
-// Field names mirror docs/LLD.md §2 and MUST NOT drift; pkg/storage and
+// Field names mirror docs/LLD.md §2-§3 and MUST NOT drift; pkg/storage and
 // future drivers reference the durations directly. A zero-value Config is
-// NOT valid — it lacks Storage and ID; callers should populate at least
-// ID, Peers, and Storage. Defaults for the three timeouts are applied by
-// applyDefaults during newNode construction (per RESEARCH §Pattern 4).
+// NOT valid — it lacks Storage, Transport, StateMachine and NodeID; callers
+// should populate at least NodeID, Peers, Storage, Transport, and
+// StateMachine. Defaults for the timeouts are applied by applyDefaults
+// during newNode construction (per RESEARCH §Pattern 4).
 //
 // The three timer fields are explicit time.Duration values (never raw
 // ints, never tick counts) so callers reading the struct can reason in
@@ -48,9 +49,9 @@ type Storage interface {
 // construction time — the state machine itself only ever sees tick
 // counters (CONCURRENCY §6 / Pitfall C-6).
 type Config struct {
-	// ID is this node's stable identifier. MUST be non-empty and MUST
-	// appear in Peers (Pitfall 8 — peers includes self).
-	ID NodeID
+	// NodeID is this node's stable identifier. MUST be non-empty and MUST
+	// appear in Peers (Pitfall 8 — peers includes self). LLD §3 (R-2).
+	NodeID NodeID
 
 	// Peers is the full cluster membership including ID. Order is not
 	// significant; newNode sorts a clone via slices.Sort to defeat
@@ -89,8 +90,23 @@ type Config struct {
 	// cycle; pkg/storage.Storage structurally satisfies it.
 	Storage Storage
 
-	// Logger is the structured logger. nil is replaced by slog.Default()
-	// during applyDefaults.
+	// Transport ships Raft Messages to peers (best-effort, lossy-tolerant;
+	// LLD §3). MUST be non-nil. The driver (07-03) calls Register before the
+	// tick loop starts and routes outbound Ready messages through Send.
+	Transport Transport
+
+	// StateMachine is the consumer-owned replicated state; the Apply target
+	// for committed entries (LLD §3). MUST be non-nil. Apply is invoked
+	// exactly once per committed entry, in index order, from one goroutine.
+	StateMachine StateMachine
+
+	// StopTimeout bounds Stop()'s drain of the apply channel and tick-loop
+	// join. Default 5s (API-08/SC5; applied by applyDefaults).
+	StopTimeout time.Duration
+
+	// Logger is the structured logger. nil is replaced by a silent logger
+	// (slog.New(slog.DiscardHandler)) during applyDefaults — a library MUST
+	// NOT write to stderr unless the consumer opts in by setting Logger.
 	Logger *slog.Logger
 }
 
@@ -118,8 +134,13 @@ func (c *Config) applyDefaults() {
 	if c.Clock == nil {
 		c.Clock = clock.NewReal()
 	}
+	if c.StopTimeout == 0 {
+		c.StopTimeout = 5 * time.Second
+	}
 	if c.Logger == nil {
-		c.Logger = slog.Default()
+		// R-3: a library defaults to SILENT — no stderr output unless the
+		// consumer sets Config.Logger. slog.Default() would leak to stderr.
+		c.Logger = slog.New(slog.DiscardHandler)
 	}
 }
 
@@ -128,9 +149,12 @@ func (c *Config) applyDefaults() {
 // while %w preserves the specific field cause for logs.
 //
 // Invariants enforced:
-//   - ID is non-empty.
+//   - NodeID is non-empty.
 //   - Storage is non-nil.
-//   - Peers contains ID (Pitfall 8 — self must be in peers).
+//   - Peers contains NodeID (Pitfall 8 — self must be in peers).
+//   - Peers has odd N (R-1 — even N can split quorum; SC1 / API-01).
+//   - Transport is non-nil (R-2).
+//   - StateMachine is non-nil (R-2).
 //   - ElectionTimeoutMin < ElectionTimeoutMax (strictly).
 //   - HeartbeatInterval*3 <= ElectionTimeoutMin (P1-5 — one dropped
 //     heartbeat must not trigger an election under the configured budget).
@@ -138,14 +162,23 @@ func (c *Config) applyDefaults() {
 // Validate is called by newNode AFTER applyDefaults; callers may invoke
 // it directly to sanity-check a populated Config before construction.
 func (c *Config) Validate() error {
-	if c.ID == "" {
-		return fmt.Errorf("%w: ID is empty", ErrInvalidConfig)
+	if c.NodeID == "" {
+		return fmt.Errorf("%w: NodeID is empty", ErrInvalidConfig)
 	}
 	if c.Storage == nil {
 		return fmt.Errorf("%w: Storage is nil", ErrInvalidConfig)
 	}
-	if !slices.Contains(c.Peers, c.ID) {
-		return fmt.Errorf("%w: Peers does not contain ID %q (Pitfall 8 — self must appear in Peers)", ErrInvalidConfig, c.ID)
+	if !slices.Contains(c.Peers, c.NodeID) {
+		return fmt.Errorf("%w: Peers does not contain NodeID %q (Pitfall 8 — self must appear in Peers)", ErrInvalidConfig, c.NodeID)
+	}
+	if len(c.Peers)%2 == 0 {
+		return fmt.Errorf("%w: Peers must be odd for a clean majority, got %d (even N can split quorum)", ErrInvalidConfig, len(c.Peers))
+	}
+	if c.Transport == nil {
+		return fmt.Errorf("%w: Transport is nil", ErrInvalidConfig)
+	}
+	if c.StateMachine == nil {
+		return fmt.Errorf("%w: StateMachine is nil", ErrInvalidConfig)
 	}
 	if c.ElectionTimeoutMin >= c.ElectionTimeoutMax {
 		return fmt.Errorf("%w: ElectionTimeoutMin (%s) must be < ElectionTimeoutMax (%s)", ErrInvalidConfig, c.ElectionTimeoutMin, c.ElectionTimeoutMax)

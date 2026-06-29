@@ -10,7 +10,7 @@ import (
 // under -tags raftdebug). Returns the *node for white-box driving.
 func seedFollowerLog(t *testing.T, term Term, entries ...Entry) *node {
 	t.Helper()
-	n := newStartedNode(t, []NodeID{"n1", "leader"})
+	n := newStartedNode(t, []NodeID{"n1", "leader", "follower2"})
 	n.currentTerm = term
 	n.role = Follower
 	n.log.Append(entries...)
