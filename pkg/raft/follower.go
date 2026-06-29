@@ -46,48 +46,13 @@ func (n *node) tickFollowerLocked() {
 	}
 }
 
-// handleAppendEntriesLocked implements the Phase-5 half of Raft
-// Figure-2 AppendEntries receiver behaviour: term handling + the
-// "reset election timer FIRST" rule (Pitfall 3). The log-consistency
-// + replication body is Phase-6 work; this method ships a Phase-6
-// stand-in Success=true response so heartbeat invariants in tests do
-// not flake.
-//
-// Pitfall 3 (CRITICAL): when m.Term == n.currentTerm the election
-// timer MUST reset before any consistency check — even a rejected
-// AppendEntries from the legitimate leader keeps the follower from
-// timing out. stepLocked has already routed m.Term > n.currentTerm
-// through maybeStepDownLocked, so by the time we get here either
-// m.Term < n.currentTerm (stale) or m.Term == n.currentTerm (valid
-// leader at the current term).
-func (n *node) handleAppendEntriesLocked(m Message) {
-	if m.Term < n.currentTerm {
-		n.queueMsgLocked(Message{
-			Type:    MsgAppendEntriesResp,
-			Term:    n.currentTerm,
-			From:    n.id,
-			To:      m.From,
-			Success: false,
-		})
-		return
-	}
-	// m.Term == n.currentTerm — Raft Figure 2 receiver step 1.
-	// Reset BEFORE any further inspection. lastHeartbeat is a tick
-	// counter (C-6) tracking ticks-since-last-heartbeat.
-	n.electionElapsed = 0
-	n.lastHeartbeat = 0
-	n.leaderHint = m.From
-	// Phase-6 stand-in: consistency check + log replication body
-	// lands in pkg/raft/append_entries.go. For now reply success.
-	n.queueMsgLocked(Message{
-		Type:       MsgAppendEntriesResp,
-		Term:       n.currentTerm,
-		From:       n.id,
-		To:         m.From,
-		Success:    true,
-		MatchIndex: n.log.LastIndex(),
-	})
-}
+// The AppendEntries receiver (handleAppendEntriesLocked) lives in
+// pkg/raft/append_entries.go as of Phase 6: it grew from the Phase-5
+// stand-in (term handling + the "reset election timer FIRST" rule,
+// Pitfall 3) into the full Raft §5.3 Figure-2 receiver — log-matching
+// consistency check (REPL-03), conflict truncation (REPL-07) with the
+// truncate-above-commit safety guard (SC4/P0-3), follower commitIndex
+// advance, and the Success/MatchIndex reply.
 
 // isCandidateUpToDate implements Raft §5.4.1's log-completeness
 // predicate. Pure function — 05-03's TestFigure7 will table-drive it
