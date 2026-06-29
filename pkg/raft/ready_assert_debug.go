@@ -28,6 +28,8 @@ import "fmt"
 // build is meant to fail loudly under -race -count=N stress so the
 // regression is impossible to silently ship.
 func assertReadyInvariantsLocked(n *node) {
+	assertAppendPrecedesAEResponseLocked(n)
+
 	if n.pendingHS == nil {
 		return
 	}
@@ -48,6 +50,45 @@ func assertReadyInvariantsLocked(n *node) {
 			panic(fmt.Sprintf(
 				"raft: ready invariant: pendingHS.VotedFor=%q but grant response.To=%q at term %d",
 				hsVotedFor, m.To, hsTerm,
+			))
+		}
+	}
+}
+
+// assertAppendPrecedesAEResponseLocked panics if the P0-4-final layer-2
+// invariant is violated. Caller holds n.mu (Ready acquires it).
+//
+// Invariant (REPL-09 extended / PITFALLS P0-4 / RESEARCH Pattern 5):
+//
+//	If the pending Ready batch contains a MsgAppendEntriesResp with
+//	Success == true and MatchIndex == M (M > 0), then the node's own log
+//	MUST already reflect entries up to M, i.e. n.log.LastIndex() >= M at
+//	the Ready boundary.
+//
+// Rationale: a Success AE response advertises to the leader that the
+// follower has durably accepted entries up to MatchIndex. The follower's
+// AppendEntries receiver appends to n.log AND mirrors into n.storage
+// BEFORE queuing the Success response (plan 06-04 / RATIFIED decision 2).
+// If a Success response ever claimed a MatchIndex the node's log does not
+// cover, the follower would be advertising durability it had not achieved
+// — the P0-4 failure mode. This assertion catches that drift at the
+// Ready() boundary before the bad response can leave the process.
+//
+// Like the vote-grant invariant this is a panic, not a t.Fatal: the
+// raftdebug build is meant to fail loudly under -race -count=N stress so
+// the regression is impossible to silently ship.
+func assertAppendPrecedesAEResponseLocked(n *node) {
+	last := n.log.LastIndex()
+	for _, pm := range n.pendingMsgs {
+		m := pm.msg
+		if m.Type != MsgAppendEntriesResp || !m.Success || m.MatchIndex == 0 {
+			continue
+		}
+		if m.MatchIndex > last {
+			panic(fmt.Sprintf(
+				"raft: ready invariant: MsgAppendEntriesResp Success=true MatchIndex=%d "+
+					"exceeds log.LastIndex()=%d (P0-4: advertising entries the node has not appended)",
+				m.MatchIndex, last,
 			))
 		}
 	}
