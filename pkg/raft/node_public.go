@@ -219,22 +219,57 @@ func (n *nodeImpl) Step(ctx context.Context, msg Message) error {
 	return n.core.Step(msg)
 }
 
-// Propose submits a command for replication.
+// Propose submits a command for replication and blocks until the entry is
+// APPLIED (StateMachine.Apply has RETURNED on this node) — not merely committed
+// (SC3 / API-03). It registers a cap-1 waiter keyed by the assigned index, then
+// parks on that waiter channel (resolved by apply.go applyOne) or on ctx.
 //
-// 07-03 completes this: the real path registers a waiter keyed by the assigned
-// index, hands the entry to the leader, and blocks until the apply loop
-// resolves the waiter (or ctx/leadership loss intervenes). For 07-02 it returns
-// a TODO-marked placeholder so the type satisfies the interface; the spine
-// (waiters, applyCh) it needs is already declared on nodeImpl.
+// Error contract:
+//   - ErrStopped if the node is stopped (API-02).
+//   - *ErrNotLeader{LeaderHint} on follower/candidate role — retry the hint
+//     (API-04).
+//   - ErrProposalDropped if proposeLocked refuses the entry immediately (e.g.
+//     a step-down raced between the role check and the propose — the !ok path).
+//   - ctx.Err() on caller cancellation (API-09). Per LLD §3 the entry MAY STILL
+//     COMMIT LATER — Propose returning ctx.Err() is NOT a guarantee the entry
+//     was dropped.
+//
+// v1 BEHAVIOUR (RESEARCH Open-Q 3): leadership lost AFTER proposeLocked accepts
+// but BEFORE the entry commits is NOT actively cancelled — the caller relies on
+// the ctx deadline (LLD §3 ctx.Err() fallback). A core step-down hook that
+// proactively cancels in-flight waiters is a v1.1 follow-up (recorded in the
+// SUMMARY), not a v1 blocker.
+//
+// Pitfall 5: the waiter is deleted on EVERY exit — the happy path via
+// LoadAndDelete in applyOne, the ctx path via Delete here. The cap-1 buffer on
+// the result channel means a late applier send AFTER a ctx-timeout return never
+// blocks (the value is dropped with the GC'd channel).
 func (n *nodeImpl) Propose(ctx context.Context, data []byte) (Index, Term, error) {
 	if n.stopped.Load() {
 		return 0, 0, ErrStopped
 	}
-	_ = ctx
-	_ = data
-	// 07-03 completes this: replace with the real waiter-registry + leader
-	// proposeLocked path. Until then a Propose is a no-op drop.
-	return 0, 0, ErrProposalDropped
+	n.core.mu.Lock()
+	if n.core.role != Leader {
+		hint := n.core.leaderHint
+		n.core.mu.Unlock()
+		return 0, 0, &ErrNotLeader{LeaderHint: hint} // API-04
+	}
+	idx, ok := n.core.proposeLocked(data)
+	term := n.core.currentTerm
+	n.core.mu.Unlock()
+	if !ok {
+		return 0, 0, ErrProposalDropped
+	}
+
+	ch := make(chan proposeResult, 1) // cap 1: applier's send never blocks (Pitfall 5)
+	n.waiters.Store(idx, ch)
+	select {
+	case r := <-ch: // APPLIED (not just committed) — SC3
+		return idx, term, r.err
+	case <-ctx.Done(): // API-09; entry MAY still commit later (LLD §3)
+		n.waiters.Delete(idx)
+		return 0, 0, ctx.Err()
+	}
 }
 
 // Start brings the node online: it registers the inbound callback on the
@@ -291,21 +326,10 @@ func (n *nodeImpl) Stop() error {
 	return n.stopErr // all callers observe the same result (Global Invariant 3)
 }
 
-// runTicker (driver.go) and runInbound (driver.go) supply the real tick loop
-// and inbound seam. They were the 07-02 placeholders here; 07-03 promoted the
-// real bodies into driver.go alongside the commit->apply enqueue seam and the
-// inproc Transport adapter.
-
-// runApply is the single-goroutine apply loop that drains applyCh and calls
-// StateMachine.Apply in index order (LLD §5 invariant 4), advancing appliedIdx
-// after each Apply returns and resolving any registered waiter.
-//
-// 07-03 replaces this placeholder body with the real apply loop. For 07-02 it
-// blocks until the root context is cancelled, then exits.
-func (n *nodeImpl) runApply(ctx context.Context) {
-	defer n.wg.Done()
-	<-ctx.Done() // 07-03 replaces this placeholder body
-}
+// runTicker + runInbound (driver.go) and runApply + applyOne (apply.go) supply
+// the real goroutine bodies. They were the 07-02 placeholders here; 07-03
+// promoted the real bodies into driver.go (tick loop + commit->apply enqueue
+// seam) and apply.go (single applier + panic recovery + waiter signalling).
 
 // Static assertion: *nodeImpl satisfies the public Node interface.
 var _ Node = (*nodeImpl)(nil)
