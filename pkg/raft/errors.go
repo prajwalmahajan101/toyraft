@@ -24,8 +24,42 @@ var ErrSnapshotUnsupported = errors.New("raft: snapshot not supported in v1")
 // fmt.Errorf using %w when reporting which field failed.
 var ErrInvalidConfig = errors.New("raft: invalid config")
 
-// ErrStopped is returned by node.Step when the node has not yet completed
-// its start-up sequence (LoadHardState has not run). This makes a stray
-// MsgTick before start a deterministic no-op error rather than a panic on
-// uninitialised state (Pitfall 6 — pre-start state machine guard).
-var ErrStopped = errors.New("raft: node not started")
+// ErrStopped is the single lifecycle sentinel for a node that is not
+// accepting work. It covers TWO cases (LLD §3 names exactly one sentinel,
+// so both share it and errors.Is(err, ErrStopped) stays the lone classifier):
+//
+//   - Pre-start guard: node.Step before the start-up sequence completes
+//     (LoadHardState has not run). Makes a stray MsgTick before start a
+//     deterministic no-op error rather than a panic on uninitialised state
+//     (Pitfall 6 — pre-start state machine guard).
+//   - Post-Stop guard (Phase 7): after the public Node's Stop returns,
+//     Propose, Step, and Status all return ErrStopped (LLD §3 Node contract).
+//
+// The message is broadened to read correctly in both cases.
+var ErrStopped = errors.New("raft: node stopped or not started")
+
+// ErrNotLeader is returned by Propose (and by Transport handlers) when this
+// node is not the current leader. LeaderHint carries the best-known current
+// leader NodeID (best-effort; may be empty if unknown). API-04 / LLD §3-§4.
+//
+// Invariants:
+//   - LeaderHint, if non-empty, MUST refer to a NodeID in Config.Peers.
+//   - Wire projection: docs/WIRE.md X-Raft-Leader-Hint header carries
+//     LeaderHint verbatim; the JSON error envelope carries it as
+//     "leader_hint".
+//
+// A POINTER receiver implements error, so the error value is &ErrNotLeader{...}.
+type ErrNotLeader struct {
+	LeaderHint NodeID
+}
+
+func (e *ErrNotLeader) Error() string {
+	if e.LeaderHint == "" {
+		return "raft: not leader"
+	}
+	return "raft: not leader (leader hint: " + string(e.LeaderHint) + ")"
+}
+
+// ErrProposalDropped is returned by Propose when leadership is lost before
+// the proposed entry commits. Safe to retry (LLD §3 Propose contract).
+var ErrProposalDropped = errors.New("raft: proposal dropped (leadership lost before commit)")
