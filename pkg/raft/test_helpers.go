@@ -16,6 +16,15 @@ package raft
 // needs to land the SC5 OrderingStorage assertion. No other *node
 // surface is exposed; tests that need deeper access continue to live
 // inside pkg/raft itself.
+//
+// Phase-6 widening (06-01): the handle grows a client-proposal hook
+// (Propose -> proposeLocked, REPL-02) and read-only progress inspectors
+// (Log, CommitIndex, MatchIndex, NextIndex) so plans 06-02..06-05 can
+// inject entries into a real leader and assert replication/commit
+// progress without reaching into the unexported *node. Every method
+// takes n.mu (like RoleAndTerm) and returns values / deep copies, never
+// live references. This handle is still deleted in Phase 7 when raft.New /
+// raft.Node land.
 
 // TestNode is a thin exported wrapper around *node, restricted to the
 // Step + Ready surface. Construction goes through NewTestNode.
@@ -73,4 +82,56 @@ func (t *TestNode) RoleAndTerm() (Role, Term) {
 // node; safe to call without locking.
 func (t *TestNode) ID() NodeID {
 	return t.n.id
+}
+
+// Propose injects a client proposal into the wrapped node under n.mu and
+// returns (assignedIndex, true) on a leader, or (0, false) otherwise
+// (REPL-02). Phase-6 test hook; deleted in Phase 7 with the rest of
+// TestNode.
+func (t *TestNode) Propose(data []byte) (Index, bool) {
+	t.n.mu.Lock()
+	defer t.n.mu.Unlock()
+	return t.n.proposeLocked(data)
+}
+
+// Log returns a deep copy of the wrapped node's replicated log entries
+// under n.mu. The copy is owned by the caller; subsequent log mutation
+// does not alias it.
+func (t *TestNode) Log() []Entry {
+	t.n.mu.Lock()
+	defer t.n.mu.Unlock()
+	out := make([]Entry, len(t.n.log.entries))
+	copy(out, t.n.log.entries)
+	return out
+}
+
+// CommitIndex returns the wrapped node's commitIndex under n.mu.
+func (t *TestNode) CommitIndex() Index {
+	t.n.mu.Lock()
+	defer t.n.mu.Unlock()
+	return t.n.commitIndex
+}
+
+// MatchIndex returns a clone of the wrapped node's matchIndex map under
+// n.mu. The clone is owned by the caller.
+func (t *TestNode) MatchIndex() map[NodeID]Index {
+	t.n.mu.Lock()
+	defer t.n.mu.Unlock()
+	out := make(map[NodeID]Index, len(t.n.matchIndex))
+	for k, v := range t.n.matchIndex {
+		out[k] = v
+	}
+	return out
+}
+
+// NextIndex returns a clone of the wrapped node's nextIndex map under
+// n.mu. The clone is owned by the caller.
+func (t *TestNode) NextIndex() map[NodeID]Index {
+	t.n.mu.Lock()
+	defer t.n.mu.Unlock()
+	out := make(map[NodeID]Index, len(t.n.nextIndex))
+	for k, v := range t.n.nextIndex {
+		out[k] = v
+	}
+	return out
 }
