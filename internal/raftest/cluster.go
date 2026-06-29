@@ -1,6 +1,7 @@
 package raftest
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -34,6 +35,13 @@ type Cluster struct {
 	nodes     []*RaftNodeAdapter // real-node adapters; Phase 5 driver
 	ctx       context.Context    // used for Endpoint.Send and shutdown
 	cancel    context.CancelFunc
+
+	// committed is the cluster-wide record of every committed entry the
+	// suite has ever observed, keyed by 1-based log index. Populated by
+	// AssertNoCommittedEntryLost on each call (REPL-10 spirit): a
+	// committed entry is immutable, so once recorded it must never change
+	// at any node. nil until the first AssertNoCommittedEntryLost call.
+	committed map[raft.Index]raft.Entry
 }
 
 // RaftNodeAdapter wraps a *raft.TestNode plus the per-node IO
@@ -261,6 +269,125 @@ func (c *Cluster) AssertAtMostOneLeaderPerTerm() {
 				term, len(ids), ids, c.Seed)
 		}
 	}
+}
+
+// AssertLogMatching is the REPL-11 log-matching invariant. For every
+// ordered PAIR of nodes it walks the common index range; if at some
+// index i both logs carry an entry with the SAME term, then every entry
+// at indices < i MUST be byte-identical (term + data) between the two
+// logs. A divergence below a matching (index, term) fails via t.Fatalf
+// with the two node IDs, the index, and the seed (for bisecting).
+//
+// This is the Raft §5.3 Log Matching property as a continuous invariant:
+// it holds at every tick under chaos. Log snapshots are taken through the
+// TestNode.Log() accessor, which copies under n.mu, so no live reference
+// escapes. Comparing every ordered pair (not just adjacent) keeps the
+// check symmetric and robust regardless of cluster iteration order.
+func (c *Cluster) AssertLogMatching() {
+	c.T.Helper()
+	logs := make([][]raft.Entry, c.N)
+	for i, a := range c.nodes {
+		logs[i] = a.node.Log()
+	}
+	for i := range c.nodes {
+		for j := range c.nodes {
+			if i == j {
+				continue
+			}
+			c.assertPairLogMatch(c.nodes[i].id, logs[i], c.nodes[j].id, logs[j])
+		}
+	}
+}
+
+// assertPairLogMatch enforces log-matching for one ordered (a, b) pair.
+// Walking the common prefix, the first index where both logs agree on
+// term obligates every earlier index to be byte-identical. We scan from
+// the highest common index downward: the first matching (index, term)
+// found pins the prefix below it, so any mismatch at a lower index is a
+// genuine REPL-11 violation.
+func (c *Cluster) assertPairLogMatch(aID raft.NodeID, aLog []raft.Entry, bID raft.NodeID, bLog []raft.Entry) {
+	common := min(len(aLog), len(bLog))
+	for k := common - 1; k >= 0; k-- {
+		if aLog[k].Term != bLog[k].Term {
+			continue
+		}
+		// log[k] agrees on term: indices 0..k MUST be byte-identical.
+		for m := 0; m <= k; m++ {
+			if aLog[m].Term != bLog[m].Term || !bytes.Equal(aLog[m].Data, bLog[m].Data) {
+				c.T.Fatalf("REPL-11 log-matching violation: nodes %s and %s agree at index %d "+
+					"(term %d) but diverge at index %d: %s=%+v %s=%+v (seed=%d)",
+					aID, bID, k+1, aLog[k].Term, m+1, aID, aLog[m], bID, bLog[m], c.Seed)
+			}
+		}
+		return
+	}
+}
+
+// AssertNoCommittedEntryLost enforces that committed entries are immutable
+// (REPL-10 spirit, as a continuous invariant). It maintains a cluster-wide
+// record of every committed entry observed: on each call, for every node,
+// for every index up to that node's CommitIndex(), it records the entry on
+// first sight and asserts equality against the record thereafter. A node
+// that reports an entry at a previously-committed index whose (term, data)
+// differs from the recorded committed entry fails via t.Fatalf with the
+// node ID, the index, both entries, and the seed.
+//
+// Committed entries live at log indices <= CommitIndex(); the log is
+// 1-based so log[i-1] is the entry at index i. Snapshots come from the
+// TestNode.Log()/CommitIndex() accessors (copied under n.mu).
+func (c *Cluster) AssertNoCommittedEntryLost() {
+	c.T.Helper()
+	if c.committed == nil {
+		c.committed = make(map[raft.Index]raft.Entry)
+	}
+	for _, a := range c.nodes {
+		entries := a.node.Log()
+		ci := a.node.CommitIndex()
+		for idx := raft.Index(1); idx <= ci; idx++ {
+			if int(idx) > len(entries) {
+				// A node may not yet hold every committed entry it has
+				// learned about via LeaderCommit; only assert entries it
+				// actually has in its log.
+				break
+			}
+			got := entries[idx-1]
+			prev, seen := c.committed[idx]
+			if !seen {
+				c.committed[idx] = got
+				continue
+			}
+			if prev.Term != got.Term || !bytes.Equal(prev.Data, got.Data) {
+				c.T.Fatalf("REPL-10 committed-entry-lost violation: node %s changed committed "+
+					"index %d from %+v to %+v (seed=%d)", a.id, idx, prev, got, c.Seed)
+			}
+		}
+	}
+}
+
+// ProposeToLeader is the Phase-6 real-replication client entry point. It
+// finds the current leader via c.Leader(), looks up its RaftNodeAdapter /
+// TestNode, and calls TestNode.Propose(op), returning (assignedIndex,
+// true) on success or (0, false) when no leader currently exists or the
+// node refused the proposal (lost leadership between Leader() and the
+// call). Unlike the Phase-4 Recorder shim Propose (below), this drives a
+// real entry into a real leader's log so replication/commit can be
+// observed.
+//
+// The recorder-shim Propose is intentionally left untouched until Phase 7
+// so TestCluster_TwoRunsByteIdentical stays byte-identical: that test
+// drives the deterministic history through the Recorder, not the real
+// state machine. ProposeToLeader is the separate real-leader path used by
+// TestFigure8 and TestNoLogDivergence_Chaos.
+func (c *Cluster) ProposeToLeader(op []byte) (raft.Index, bool) {
+	leaderID, _ := c.Leader()
+	if leaderID == "" {
+		return 0, false
+	}
+	a := c.NodeByID(leaderID)
+	if a == nil {
+		return 0, false
+	}
+	return a.node.Propose(op)
 }
 
 // HasLeader reports whether any node currently reports Role=Leader.
