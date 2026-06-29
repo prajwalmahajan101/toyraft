@@ -57,13 +57,15 @@ func TestFigure7(t *testing.T) {
 func makeElectionConfig(t *testing.T, id NodeID, peers []NodeID, seed int64) *Config {
 	t.Helper()
 	return &Config{
-		ID:                 id,
+		NodeID:             id,
 		Peers:              peers,
 		ElectionTimeoutMin: 150 * time.Millisecond,
 		ElectionTimeoutMax: 300 * time.Millisecond,
 		HeartbeatInterval:  50 * time.Millisecond,
 		Seed:               seed,
 		Storage:            fakeStorage{},
+		Transport:          nopTransport{},
+		StateMachine:       nopSM{},
 	}
 }
 

@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -25,6 +26,24 @@ func (fakeStorage) LoadHardState() (HardState, error)     { return HardState{}, 
 func (fakeStorage) Snapshot() ([]byte, Index, error)      { return nil, 0, ErrSnapshotUnsupported }
 func (fakeStorage) Restore([]byte) error                  { return ErrSnapshotUnsupported }
 
+// nopTransport / nopSM are minimal in-test doubles so Config.Validate's
+// nil-Transport / nil-StateMachine rules (R-2) pass. They do nothing; the
+// real Transport/StateMachine wiring is exercised by the package-external
+// integration tests in later Phase-7 plans (07-03/07-04). Declared ONCE
+// here (the file that owns the shared node-building helpers); other _test
+// files in this package reuse these symbols.
+type nopTransport struct{}
+
+func (nopTransport) Send(context.Context, Message) error                   { return nil }
+func (nopTransport) Register(func(ctx context.Context, msg Message) error) {}
+func (nopTransport) Close() error                                          { return nil }
+
+type nopSM struct{}
+
+func (nopSM) Apply(Entry) (any, error)         { return nil, nil }
+func (nopSM) Snapshot() ([]byte, Index, error) { return nil, 0, ErrSnapshotUnsupported }
+func (nopSM) Restore([]byte) error             { return ErrSnapshotUnsupported }
+
 // newTestNode constructs a *node for tests via newNode and then flips
 // started=false so callers can exercise the pre-start ErrStopped guard
 // (Pitfall 6). 05-02 extended newNode to set started=true after the
@@ -33,9 +52,11 @@ func (fakeStorage) Restore([]byte) error                  { return ErrSnapshotUn
 func newTestNode(t *testing.T, peers []NodeID) *node {
 	t.Helper()
 	n, err := newNode(&Config{
-		ID:      peers[0],
-		Peers:   peers,
-		Storage: fakeStorage{},
+		NodeID:       peers[0],
+		Peers:        peers,
+		Storage:      fakeStorage{},
+		Transport:    nopTransport{},
+		StateMachine: nopSM{},
 	})
 	if err != nil {
 		t.Fatalf("newNode: %v", err)
@@ -51,9 +72,11 @@ func newTestNode(t *testing.T, peers []NodeID) *node {
 func newStartedNode(t *testing.T, peers []NodeID) *node {
 	t.Helper()
 	n, err := newNode(&Config{
-		ID:      peers[0],
-		Peers:   peers,
-		Storage: fakeStorage{},
+		NodeID:       peers[0],
+		Peers:        peers,
+		Storage:      fakeStorage{},
+		Transport:    nopTransport{},
+		StateMachine: nopSM{},
 	})
 	if err != nil {
 		t.Fatalf("newNode: %v", err)
@@ -150,7 +173,7 @@ func TestStepUnknownMessageTypeReturnsError(t *testing.T) {
 // candidate message on every received vote).
 func TestStepEqualTermDoesNotBumpEpoch(t *testing.T) {
 	t.Parallel()
-	n := newStartedNode(t, []NodeID{"n1", "n2"})
+	n := newStartedNode(t, []NodeID{"n1", "n2", "n3"})
 	n.currentTerm = 3
 	n.role = Candidate
 	n.stepDownEpoch = 4
@@ -172,7 +195,7 @@ func TestStepEqualTermDoesNotBumpEpoch(t *testing.T) {
 // step down.
 func TestStepLowerTermDoesNotBumpEpoch(t *testing.T) {
 	t.Parallel()
-	n := newStartedNode(t, []NodeID{"n1", "n2"})
+	n := newStartedNode(t, []NodeID{"n1", "n2", "n3"})
 	n.currentTerm = 5
 	n.role = Leader
 	n.stepDownEpoch = 9
@@ -220,16 +243,19 @@ func TestConfigValidate(t *testing.T) {
 		wantErr bool
 	}{
 		{"happy path", func(c *Config) {}, false},
-		{"empty ID", func(c *Config) { c.ID = "" }, true},
+		{"empty NodeID", func(c *Config) { c.NodeID = "" }, true},
 		{"nil storage", func(c *Config) { c.Storage = nil }, true},
-		{"self not in peers", func(c *Config) { c.Peers = []NodeID{"n2", "n3"} }, true},
+		{"self not in peers", func(c *Config) { c.Peers = []NodeID{"n1", "n2", "n3"}; c.NodeID = "n9" }, true},
+		{"even N", func(c *Config) { c.Peers = []NodeID{"n1", "n2"} }, true},
+		{"nil transport", func(c *Config) { c.Transport = nil }, true},
+		{"nil state machine", func(c *Config) { c.StateMachine = nil }, true},
 		{"min >= max", func(c *Config) { c.ElectionTimeoutMin = 600; c.ElectionTimeoutMax = 600 }, true},
 		{"heartbeat margin violated", func(c *Config) { c.HeartbeatInterval = 200; c.ElectionTimeoutMin = 300 }, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			c := &Config{ID: "n1", Peers: []NodeID{"n1"}, Storage: fakeStorage{}}
+			c := &Config{NodeID: "n1", Peers: []NodeID{"n1"}, Storage: fakeStorage{}, Transport: nopTransport{}, StateMachine: nopSM{}}
 			c.applyDefaults()
 			tc.mutate(c)
 			err := c.Validate()
@@ -252,9 +278,11 @@ func TestConfigValidate(t *testing.T) {
 func TestNewNodeSortsPeers(t *testing.T) {
 	t.Parallel()
 	n, err := newNode(&Config{
-		ID:      "n2",
-		Peers:   []NodeID{"n3", "n1", "n2"},
-		Storage: fakeStorage{},
+		NodeID:       "n2",
+		Peers:        []NodeID{"n3", "n1", "n2"},
+		Storage:      fakeStorage{},
+		Transport:    nopTransport{},
+		StateMachine: nopSM{},
 	})
 	if err != nil {
 		t.Fatalf("newNode: %v", err)

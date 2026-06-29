@@ -4,10 +4,28 @@ import (
 	"testing"
 	"time"
 
+	"context"
+
 	"github.com/prajwalmahajan101/toyraft/internal/raftest"
 	"github.com/prajwalmahajan101/toyraft/pkg/raft"
 	"github.com/prajwalmahajan101/toyraft/pkg/storage/memory"
 )
+
+// nopTransport / nopSM satisfy Config.Validate's nil-Transport /
+// nil-StateMachine rules (R-2) for these raftest-side ordering tests.
+// They do nothing; 07-04 replaces the raftest path with the real inproc
+// adapter + recordingSM.
+type nopTransport struct{}
+
+func (nopTransport) Send(context.Context, raft.Message) error                   { return nil }
+func (nopTransport) Register(func(ctx context.Context, msg raft.Message) error) {}
+func (nopTransport) Close() error                                               { return nil }
+
+type nopSM struct{}
+
+func (nopSM) Apply(raft.Entry) (any, error)         { return nil, nil }
+func (nopSM) Snapshot() ([]byte, raft.Index, error) { return nil, 0, raft.ErrSnapshotUnsupported }
+func (nopSM) Restore([]byte) error                  { return raft.ErrSnapshotUnsupported }
 
 // TestVotePersistsBeforeResponse — SC5 layer-3 (the assertion-enforced
 // proof). Drives a vote grant through the test driver pattern that
@@ -26,13 +44,15 @@ func TestVotePersistsBeforeResponse(t *testing.T) {
 	ord := raftest.NewOrderingStorage(mem)
 
 	cfg := &raft.Config{
-		ID:                 "n1",
+		NodeID:             "n1",
 		Peers:              []raft.NodeID{"n1", "n2", "n3"},
 		ElectionTimeoutMin: 300 * time.Millisecond,
 		ElectionTimeoutMax: 600 * time.Millisecond,
 		HeartbeatInterval:  100 * time.Millisecond,
 		Seed:               42,
 		Storage:            ord,
+		Transport:          nopTransport{},
+		StateMachine:       nopSM{},
 	}
 	n, err := raft.NewTestNode(cfg)
 	if err != nil {

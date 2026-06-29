@@ -15,6 +15,26 @@ import (
 	"github.com/prajwalmahajan101/toyraft/pkg/transport/inproc"
 )
 
+// clusterNopTransport / clusterNopSM satisfy Config.Validate's
+// nil-Transport / nil-StateMachine rules (07-01 R-2) for the existing
+// raftest driver path, which still drives Step/Ready/Send through the
+// Hub directly rather than through Transport. 07-04 replaces these with
+// the real inproc adapter + a recordingSM.
+type clusterNopTransport struct{}
+
+func (clusterNopTransport) Send(context.Context, raft.Message) error { return nil }
+func (clusterNopTransport) Register(func(ctx context.Context, msg raft.Message) error) {
+}
+func (clusterNopTransport) Close() error { return nil }
+
+type clusterNopSM struct{}
+
+func (clusterNopSM) Apply(raft.Entry) (any, error) { return nil, nil }
+func (clusterNopSM) Snapshot() ([]byte, raft.Index, error) {
+	return nil, 0, raft.ErrSnapshotUnsupported
+}
+func (clusterNopSM) Restore([]byte) error { return raft.ErrSnapshotUnsupported }
+
 // Cluster is the N-node test fixture. Plan 05-05 swaps the Phase-4
 // noopNode for RaftNodeAdapter, which wraps a real *raft.TestNode and
 // runs the canonical Step -> Recv -> Step -> Ready -> SaveHardState ->
@@ -132,11 +152,13 @@ func NewCluster(t testing.TB, n int, seed int64) *Cluster {
 	for i := range n {
 		ord := NewOrderingStorage(memory.New())
 		cfg := &raft.Config{
-			ID:      c.nodeIDs[i],
-			Peers:   slices.Clone(peers),
-			Seed:    seed,
-			Clock:   clk,
-			Storage: ord,
+			NodeID:       c.nodeIDs[i],
+			Peers:        slices.Clone(peers),
+			Seed:         seed,
+			Clock:        clk,
+			Storage:      ord,
+			Transport:    clusterNopTransport{},
+			StateMachine: clusterNopSM{},
 		}
 		node, err := raft.NewTestNode(cfg)
 		if err != nil {
