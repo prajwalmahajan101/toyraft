@@ -386,6 +386,35 @@ type StateMachine interface {
 > already the documented contract; plan 06-01's `applyDefaults` alignment
 > was a **conformance fix** toward §2, not a contract change, so no RFC is
 > owed (PROC-03 not triggered).
+>
+> **Phase 7 back-patch (2026-06-29).** The public library surface frozen in §3
+> landed: `raft.New(cfg) (Node, error)` and the `Node` interface
+> (`Start`/`Stop`/`Propose`/`Step`/`Status`/`LeaderHint`), plus the `Transport`,
+> `StateMachine`, and `Status` types and the `ErrNotLeader{LeaderHint}` /
+> `ErrProposalDropped` errors (plans 07-01/07-02/07-03). The driver (07-03)
+> wires `Transport.Register` before the tick loop and routes outbound Ready
+> messages through `Send`; the bounded single-goroutine apply path (07-03)
+> feeds committed entries to `StateMachine.Apply` (§5 invariant 4). The
+> `raft.TestNode` exported test handle and its Phase-6 `Propose` /
+> `Log` / `CommitIndex` / `MatchIndex` / `NextIndex` widening were **deleted**
+> (plan 07-04); `internal/raftest` now drives the real `raft.New` / `raft.Node`
+> surface (07-04's `TickForTest` / `DrainForTest` are off-golden methods on the
+> unexported `*nodeImpl`, so `go doc -all` — and the LLD golden — are unchanged
+> by them). **Conformance reconciliations against the frozen §3 contract:**
+> R-1 `Config.Validate` now rejects even `N` (odd-quorum requirement);
+> R-2 `Validate` rejects nil `Transport` / nil `StateMachine`; R-3 `applyDefaults`
+> uses a silent `slog.DiscardHandler` (a library must not write stderr unless
+> the consumer opts in) and a 5 s `StopTimeout` default; `Config.ID` was renamed
+> to **`Config.NodeID`** to match §3. R-4 (the `pkg/raft.Storage` ↔
+> `pkg/storage.Storage` duplication deferred since Phase 5) was **resolved in
+> ADR-0012**: the local `pkg/raft.Storage` subset is ratified as the canonical
+> Raft-side view, the duplication is documented and guarded by
+> `scripts/check-lld-drift.sh` (option b), with the v2 leaf-package door (option
+> a) left open. The §4 `ErrStopped` message was **broadened** to
+> `"raft: node stopped or not started"` so the single sentinel covers both the
+> pre-start and post-Stop guards (`errors.Is(err, ErrStopped)` stays the lone
+> classifier) — the §4 listing below is updated to match the code. No frozen §3
+> interface signature changed; the code now matches the frozen targets.
 
 ```go
 // Storage composes log and hard-state persistence. Implementations live in
@@ -579,8 +608,8 @@ func (e *ErrNotLeader) Error() string {
 
 // Plain sentinel errors. Compare with errors.Is.
 var (
-    ErrStopped             = errors.New("raft: node stopped")
-    ErrProposalDropped     = errors.New("raft: proposal dropped (leader lost)")
+    ErrStopped             = errors.New("raft: node stopped or not started")
+    ErrProposalDropped     = errors.New("raft: proposal dropped (leadership lost before commit)")
     ErrSnapshotUnsupported = errors.New("raft: snapshot not supported in v1")
 )
 ```
