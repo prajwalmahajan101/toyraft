@@ -89,6 +89,44 @@ func (n *node) proposeLocked(data []byte) (Index, bool) {
 	return idx, true
 }
 
+// handleAppendEntriesRespLocked processes a follower's AppendEntries
+// response: it advances per-peer progress on success (then runs the
+// commit rule) or slow-probes nextIndex down on failure (REPL-04).
+// Caller MUST hold n.mu. (Raft Figure 2 Leaders + RESEARCH Pattern 3.)
+//
+// Stale-response guard (mirrors handleRequestVoteResponseLocked,
+// candidate.go:74): a late response from a prior term, or one arriving
+// after we have stepped down, MUST NOT mutate matchIndex/nextIndex —
+// otherwise a stale MatchIndex would corrupt the commit snapshot
+// (RESEARCH anti-pattern "resetting matchIndex from a stale response").
+// stepLocked already routed m.Term > currentTerm through
+// maybeStepDownLocked (term-first funnel, ELEC-07 / P0-5), so a
+// higher-term response has already demoted us before we get here; we do
+// NOT inline a second term-step-down (that re-introduces the P0-5 TOCTOU).
+//
+// On success: matchIndex[peer]=resp.MatchIndex, nextIndex[peer]=that+1,
+// then maybeAdvanceCommitLocked() (commit.go) may bump commitIndex.
+//
+// On failure (REPL-04 slow probe): decrement nextIndex[peer] (floored at
+// 1) so the next tickLeaderLocked re-probes from a lower point. The
+// fast-rollback / ConflictTerm back-jump is deliberately NOT implemented
+// (deferred, REPL-04).
+func (n *node) handleAppendEntriesRespLocked(m Message) {
+	if n.role != Leader || m.Term != n.currentTerm {
+		return
+	}
+	if m.Success {
+		n.matchIndex[m.From] = m.MatchIndex
+		n.nextIndex[m.From] = m.MatchIndex + 1
+		n.maybeAdvanceCommitLocked() // commit.go
+		return
+	}
+	// REPL-04 slow probe: decrement and re-probe next tick. Floor at 1.
+	if n.nextIndex[m.From] > 1 {
+		n.nextIndex[m.From]--
+	}
+}
+
 // entriesFrom returns a DEEP COPY of the log entries with Index >= lo.
 //
 // Returns nil when lo > LastIndex() (the heartbeat case — no entries to
