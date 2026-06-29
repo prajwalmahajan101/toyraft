@@ -42,15 +42,22 @@ type OrderingEventKind int
 const (
 	EventSaveHS OrderingEventKind = iota + 1
 	EventSend
+	// EventAppend records a Storage.Append call (P0-4 final / REPL-09).
+	// Used by AssertAppendPrecedesAppendEntriesResponse to prove the
+	// follower persisted entries BEFORE shipping a Success AE response
+	// claiming them.
+	EventAppend
 )
 
 // OrderingEvent is one record in the monotonic event log. Only the
-// kind-relevant field (hs or msg) is populated for any given event.
+// kind-relevant field (hs, msg, or entries) is populated for any given
+// event.
 type OrderingEvent struct {
-	seq  uint64
-	kind OrderingEventKind
-	hs   raft.HardState
-	msg  raft.Message
+	seq     uint64
+	kind    OrderingEventKind
+	hs      raft.HardState
+	msg     raft.Message
+	entries []raft.Entry
 }
 
 // OrderingStorage wraps a storage.Storage and records SaveHardState +
@@ -99,8 +106,16 @@ func (o *OrderingStorage) LoadHardState() (raft.HardState, error) {
 	return o.inner.LoadHardState()
 }
 
-// Append delegates.
+// Append records the call sequence then delegates. Like SaveHardState
+// the recording happens BEFORE the delegate so the event log reflects
+// the sequence of CALLS — which is what the P0-4-final precedence
+// assertion compares on. The entries slice is cloned so a later caller
+// mutation cannot corrupt the recorded event.
 func (o *OrderingStorage) Append(entries []raft.Entry) error {
+	o.mu.Lock()
+	o.seq++
+	o.events = append(o.events, OrderingEvent{seq: o.seq, kind: EventAppend, entries: slices.Clone(entries)})
+	o.mu.Unlock()
 	return o.inner.Append(entries)
 }
 
@@ -225,6 +240,67 @@ func (o *OrderingStorage) CheckHardStatePrecedesVoteGrantedResponse() error {
 			return fmt.Errorf("SC5 violation: Send(MsgRequestVoteResponse VoteGranted=true Term=%d To=%q) "+
 				"at seq=%d without prior SaveHardState{CurrentTerm=%d, VotedFor=%q}",
 				m.Term, m.To, e.seq, m.Term, m.To)
+		}
+	}
+	return nil
+}
+
+// AssertAppendPrecedesAppendEntriesResponse — P0-4-final layer-3 invariant
+// (REPL-09 extended to the replicated log).
+//
+// For every recorded Send(MsgAppendEntriesResp{Success=true,
+// MatchIndex=M}) with M>0 there MUST be an earlier (strictly lower seq)
+// recorded Append whose entries cover index M — i.e. the follower
+// persisted the entries to durable Storage BEFORE shipping a response
+// claiming them. If none is found the test fails via t.Fatalf with the
+// offending message and seq.
+//
+// Rationale: a follower that advertises MatchIndex=M while M is only in
+// its volatile in-memory log would, on crash, recover to a shorter log
+// than the leader believes it has — silently losing entries the leader
+// may treat as replicated toward quorum. The driver discipline (the node
+// calls Storage.Append from within Step, before the Ready/RecordSend that
+// ships the response) makes this impossible; OrderingStorage proves it.
+func (o *OrderingStorage) AssertAppendPrecedesAppendEntriesResponse(t *testing.T) {
+	t.Helper()
+	if err := o.CheckAppendPrecedesAppendEntriesResponse(); err != nil {
+		t.Fatalf("%v", err)
+	}
+}
+
+// CheckAppendPrecedesAppendEntriesResponse is the testing.T-free form of
+// the P0-4-final precedence check. Returns nil on a clean log, or an error
+// describing the first offending Send event. Useful for callers that want
+// to assert the negative case (the assertion itself catches a violation)
+// without failing the surrounding test.
+//
+// Coverage check: it tracks the maximum entry Index observed across all
+// prior Append events (entries are contiguous and Index-ordered, so the
+// cumulative max is the highest durably-persisted index at any seq). A
+// Success AE response with MatchIndex=M is covered iff that running max is
+// >= M at the response's seq.
+func (o *OrderingStorage) CheckAppendPrecedesAppendEntriesResponse() error {
+	events := o.Events()
+
+	var maxAppended raft.Index
+	for _, e := range events {
+		switch e.kind {
+		case EventAppend:
+			for _, ent := range e.entries {
+				if ent.Index > maxAppended {
+					maxAppended = ent.Index
+				}
+			}
+		case EventSend:
+			m := e.msg
+			if m.Type != raft.MsgAppendEntriesResp || !m.Success || m.MatchIndex == 0 {
+				continue
+			}
+			if maxAppended < m.MatchIndex {
+				return fmt.Errorf("P0-4 violation: Send(MsgAppendEntriesResp Success=true MatchIndex=%d To=%q) "+
+					"at seq=%d without a prior Append covering index %d (max appended so far=%d)",
+					m.MatchIndex, m.To, e.seq, m.MatchIndex, maxAppended)
+			}
 		}
 	}
 	return nil
