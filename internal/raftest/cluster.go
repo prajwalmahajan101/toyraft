@@ -90,6 +90,62 @@ func (a *RaftNodeAdapter) Node() *raft.TestNode { return a.node }
 // run the SC5 precedence assertion at end-of-test.
 func (a *RaftNodeAdapter) Storage() *OrderingStorage { return a.storage }
 
+// roleAndTerm returns the node's (Role, Term). This is the raftest-level
+// read seam the Assert* methods use instead of reaching into the node
+// directly. In Task 1 (TestNode still present) it delegates to
+// TestNode.RoleAndTerm; in Task 2 (public surface) it reads Status().
+func (a *RaftNodeAdapter) roleAndTerm() (raft.Role, raft.Term) {
+	return a.node.RoleAndTerm()
+}
+
+// commitIndex returns the node's reported commitIndex. raftest-level
+// read seam (see roleAndTerm); Task 2 swaps this to Status().CommitIndex.
+func (a *RaftNodeAdapter) commitIndex() raft.Index {
+	return a.node.CommitIndex()
+}
+
+// logFromStorage reads the node's replicated log from its OrderingStorage
+// (R-4 LOCKED decision): the Storage mirror IS the durable log written in
+// lockstep with the in-memory log (ADR-0011), so this is byte-equivalent
+// to the old TestNode.Log() WITHOUT adding any exported pkg/raft accessor.
+// Returns an empty (non-nil-safe) slice when the log is empty.
+func (a *RaftNodeAdapter) logFromStorage() []raft.Entry {
+	last, err := a.storage.LastIndex()
+	if err != nil {
+		a.adapterFatalf("raftest: LastIndex on %s: %v", a.id, err)
+		return nil
+	}
+	if last == 0 {
+		return nil
+	}
+	ents, err := a.storage.Entries(1, last+1)
+	if err != nil {
+		a.adapterFatalf("raftest: Entries(1,%d) on %s: %v", last+1, a.id, err)
+		return nil
+	}
+	return ents
+}
+
+// adapterFatalf reports a storage-read failure. The adapter has no
+// testing.TB handle, so it panics with the formatted message — a storage
+// read failure is a harness bug (the in-memory mirror never errors in
+// practice), surfaced loudly rather than swallowed.
+func (a *RaftNodeAdapter) adapterFatalf(format string, args ...any) {
+	panic(fmt.Sprintf(format, args...))
+}
+
+// LogOf returns a copy of node id's replicated log read from its
+// OrderingStorage mirror (R-4 LOCKED decision). figure8_test.go consumes
+// this for its logTermAt helper; it adds NO exported pkg/raft symbol
+// (keeps the LLD golden minimal).
+func (c *Cluster) LogOf(id raft.NodeID) []raft.Entry {
+	a := c.NodeByID(id)
+	if a == nil {
+		return nil
+	}
+	return a.logFromStorage()
+}
+
 // NewCluster builds an N-node cluster on a shared FakeClock + Hub at
 // the given seed. N must be odd and >= 3 (Raft quorum requirement).
 // Per-node wiring:
@@ -279,7 +335,7 @@ func (c *Cluster) AssertAtMostOneLeaderPerTerm() {
 	c.T.Helper()
 	leadersByTerm := make(map[raft.Term][]raft.NodeID)
 	for _, a := range c.nodes {
-		role, term := a.node.RoleAndTerm()
+		role, term := a.roleAndTerm()
 		if role == raft.Leader {
 			leadersByTerm[term] = append(leadersByTerm[term], a.id)
 		}
@@ -301,15 +357,16 @@ func (c *Cluster) AssertAtMostOneLeaderPerTerm() {
 // with the two node IDs, the index, and the seed (for bisecting).
 //
 // This is the Raft §5.3 Log Matching property as a continuous invariant:
-// it holds at every tick under chaos. Log snapshots are taken through the
-// TestNode.Log() accessor, which copies under n.mu, so no live reference
-// escapes. Comparing every ordered pair (not just adjacent) keeps the
-// check symmetric and robust regardless of cluster iteration order.
+// it holds at every tick under chaos. Log snapshots are read from each
+// node's OrderingStorage mirror (logFromStorage; R-4 LOCKED), which is the
+// durable log written in lockstep (ADR-0011), so no live reference escapes.
+// Comparing every ordered pair (not just adjacent) keeps the check
+// symmetric and robust regardless of cluster iteration order.
 func (c *Cluster) AssertLogMatching() {
 	c.T.Helper()
 	logs := make([][]raft.Entry, c.N)
 	for i, a := range c.nodes {
-		logs[i] = a.node.Log()
+		logs[i] = a.logFromStorage()
 	}
 	for i := range c.nodes {
 		for j := range c.nodes {
@@ -354,17 +411,18 @@ func (c *Cluster) assertPairLogMatch(aID raft.NodeID, aLog []raft.Entry, bID raf
 // differs from the recorded committed entry fails via t.Fatalf with the
 // node ID, the index, both entries, and the seed.
 //
-// Committed entries live at log indices <= CommitIndex(); the log is
-// 1-based so log[i-1] is the entry at index i. Snapshots come from the
-// TestNode.Log()/CommitIndex() accessors (copied under n.mu).
+// Committed entries live at log indices <= commitIndex; the log is
+// 1-based so log[i-1] is the entry at index i. Log snapshots come from the
+// OrderingStorage mirror (logFromStorage; R-4 LOCKED); commitIndex from the
+// node's commitIndex() seam.
 func (c *Cluster) AssertNoCommittedEntryLost() {
 	c.T.Helper()
 	if c.committed == nil {
 		c.committed = make(map[raft.Index]raft.Entry)
 	}
 	for _, a := range c.nodes {
-		entries := a.node.Log()
-		ci := a.node.CommitIndex()
+		entries := a.logFromStorage()
+		ci := a.commitIndex()
 		for idx := raft.Index(1); idx <= ci; idx++ {
 			if int(idx) > len(entries) {
 				// A node may not yet hold every committed entry it has
@@ -417,7 +475,7 @@ func (c *Cluster) ProposeToLeader(op []byte) (raft.Index, bool) {
 // step-down trigger (TestStepDownHaltsInFlight).
 func (c *Cluster) HasLeader() bool {
 	for _, a := range c.nodes {
-		role, _ := a.node.RoleAndTerm()
+		role, _ := a.roleAndTerm()
 		if role == raft.Leader {
 			return true
 		}
@@ -430,7 +488,7 @@ func (c *Cluster) HasLeader() bool {
 // the cluster's ascending nodeIDs order (lex sort by construction).
 func (c *Cluster) Leader() (raft.NodeID, raft.Term) {
 	for _, a := range c.nodes {
-		role, term := a.node.RoleAndTerm()
+		role, term := a.roleAndTerm()
 		if role == raft.Leader {
 			return a.id, term
 		}
