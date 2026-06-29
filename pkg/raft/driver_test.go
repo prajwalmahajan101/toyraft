@@ -129,12 +129,6 @@ func (s *recordingSM) Apply(e Entry) (any, error) {
 func (s *recordingSM) Snapshot() ([]byte, Index, error) { return nil, 0, ErrSnapshotUnsupported }
 func (s *recordingSM) Restore([]byte) error             { return ErrSnapshotUnsupported }
 
-func (s *recordingSM) count() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.applied)
-}
-
 func (s *recordingSM) has(data string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
