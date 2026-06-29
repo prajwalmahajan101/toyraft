@@ -15,19 +15,26 @@ package raft_test
 // Step/Ready/RoleAndTerm/Log/CommitIndex/MatchIndex/NextIndex) — never
 // in-package *node access. Same precedent as invariant_test.go.
 //
-// DETERMINISM STRATEGY: election timeouts are RNG-driven, so naming a
-// SPECIFIC node "S1" and racing it to win is non-reproducible. The Figure
-// 8 SAFETY property does not depend on WHICH node leads each stage — only
-// on the SHAPE of the churn: an old-term entry replicated to a majority
-// must not commit on replica count; it commits only once a current-term
-// entry above it reaches quorum; and a committed entry must survive the
-// subsequent churn. We therefore PARTITION the cluster into controlled
-// groups, let whichever node wins in the connected group lead (discovered
-// by scanning the island for Role=Leader at a fresh term — NOT via the
-// cluster-wide c.Leader(), which can return a stale isolated leader), and
-// track entries by INDEX + TERM rather than by node identity. Partition/
-// Heal + deterministic FakeClock ticks make the whole scenario
-// reproducible at a fixed seed.
+// DETERMINISM STRATEGY: election timeouts are RNG-driven, so neither the
+// WHICH node leads a stage nor the ABSOLUTE term it wins at is fixed across
+// runs (a clean first election can land at term 1 or higher depending on
+// scheduling, especially under -race). The Figure 8 SAFETY property does
+// not depend on either: it depends only on the SHAPE of the churn and the
+// RELATIVE term ordering termA < termB < termC, discovered from whichever
+// node actually wins in the connected island — never asserted against an
+// absolute term floor or a fixed node identity. An old-term entry
+// replicated to a majority must not commit on replica count; it commits
+// only once a current-term entry above it reaches quorum; and a committed
+// entry must survive the subsequent churn. We PARTITION the cluster into
+// controlled groups, let whichever node wins in the connected group lead
+// (discovered by scanning the island for Role=Leader at a term strictly
+// above the prior stage's term — NOT via the cluster-wide c.Leader(),
+// which can return a stale isolated leader), and track entries by INDEX +
+// TERM (the live termA/termB/termC) rather than by node identity. Because
+// the setup is keyed off the actual elected leader and relative terms — and
+// the tick budgets are generous upper bounds, not assertions — the scripted
+// shape is reached on EVERY run at the fixed seed, leaving only the safety
+// assertions able to fail.
 
 import (
 	"testing"
@@ -169,9 +176,16 @@ func TestFigure8(t *testing.T) {
 	// setup: the term-A entry at index-2 lives on a minority that does not
 	// yet commit, because every node already agrees on index-1).
 	connectOnly(c, allNodes...)
-	leaderA, termA := driveUntilLeaderIn(t, c, 0, 200, allNodes...)
-	if termA < 2 {
-		t.Fatalf("Figure8 (a): leaderA=%s term=%d; want >= 2 (seed=%d)", leaderA, termA, c.Seed)
+	leaderA, termA := driveUntilLeaderIn(t, c, 0, 400, allNodes...)
+	// termA is the actual first-election term: a clean first election from a
+	// freshly-booted cluster validly wins at term 1, and the Figure 8 shape
+	// needs only termA >= 1 plus the RELATIVE ordering termA < termB < termC
+	// (enforced by stages b/c against this live termA). driveUntilLeaderIn(.,0,.)
+	// already guarantees term > 0, so this is a redundant sanity check — NOT a
+	// >= 2 floor (that spurious floor caused the seed-12345 -race flake by
+	// rejecting the legitimate term-1 first leader).
+	if termA < 1 {
+		t.Fatalf("Figure8 (a): leaderA=%s term=%d; want >= 1 (seed=%d)", leaderA, termA, c.Seed)
 	}
 
 	// index-1: replicate + commit across all five nodes (shared baseline).
@@ -226,7 +240,7 @@ func TestFigure8(t *testing.T) {
 		}
 	}
 	connectOnly(c, rest...) // {leaderA, keep} now fully isolated ("crashed")
-	leaderB, termB := driveUntilLeaderIn(t, c, termA, 200, rest...)
+	leaderB, termB := driveUntilLeaderIn(t, c, termA, 400, rest...)
 	if termB <= termA {
 		t.Fatalf("Figure8 (b): leaderB=%s term=%d; want > %d (seed=%d)",
 			leaderB, termB, termA, c.Seed)
@@ -274,7 +288,7 @@ func TestFigure8(t *testing.T) {
 	// to this majority. DECISIVE: it must NOT commit index-2 on replica
 	// count (log[2].term == termA != currentTerm).
 	connectOnly(c, leaderA, keep, clean)
-	leaderC, termC := driveUntilLeaderIn(t, c, termB, 400, leaderA, keep, clean)
+	leaderC, termC := driveUntilLeaderIn(t, c, termB, 600, leaderA, keep, clean)
 	if termC <= termB {
 		t.Fatalf("Figure8 (c): leaderC=%s term=%d; want > %d (seed=%d)",
 			leaderC, termC, termB, c.Seed)
