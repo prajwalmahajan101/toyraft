@@ -110,3 +110,62 @@ func TestOrderingStorageDetectsViolation(t *testing.T) {
 		t.Fatalf("Check must flag the out-of-order sequence; got nil error")
 	}
 }
+
+// TestAppendPrecedesAppendEntriesResponse — P0-4-final layer-3 positive
+// case. A follower persists entries up to index M via Storage.Append
+// BEFORE shipping a Success AppendEntries response claiming MatchIndex=M.
+// The OrderingStorage event log MUST show the Append at a strictly lower
+// seq than the Send, so the precedence check passes.
+func TestAppendPrecedesAppendEntriesResponse(t *testing.T) {
+	t.Parallel()
+
+	mem := memory.New()
+	ord := raftest.NewOrderingStorage(mem)
+
+	// Persist entries covering index 2 (contiguous from index 1, as the
+	// memory store requires).
+	if err := ord.Append([]raft.Entry{
+		{Term: 1, Index: 1, Data: []byte("a")},
+		{Term: 1, Index: 2, Data: []byte("b")},
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	// Then ship the Success response claiming MatchIndex=2 (covered).
+	ord.RecordSend(raft.Message{
+		Type:       raft.MsgAppendEntriesResp,
+		Term:       1,
+		From:       "n1",
+		To:         "n0",
+		Success:    true,
+		MatchIndex: 2,
+	})
+
+	ord.AssertAppendPrecedesAppendEntriesResponse(t)
+}
+
+// TestAppendPrecedesAppendEntriesResponse_Violation pins the negative
+// case (Pitfall 8 — the assertion must not be vacuously true). A Success
+// AppendEntries response claims MatchIndex=5 with NO prior Append covering
+// index 5; the check MUST flag it. Proves the assertion actually catches
+// an over-claiming response.
+func TestAppendPrecedesAppendEntriesResponse_Violation(t *testing.T) {
+	t.Parallel()
+
+	mem := memory.New()
+	ord := raftest.NewOrderingStorage(mem)
+
+	// Send a Success response claiming MatchIndex=5 with no prior Append.
+	ord.RecordSend(raft.Message{
+		Type:       raft.MsgAppendEntriesResp,
+		Term:       1,
+		From:       "n1",
+		To:         "n0",
+		Success:    true,
+		MatchIndex: 5,
+	})
+
+	if err := ord.CheckAppendPrecedesAppendEntriesResponse(); err == nil {
+		t.Fatalf("Check must flag the over-claiming AE response; got nil error")
+	}
+}
