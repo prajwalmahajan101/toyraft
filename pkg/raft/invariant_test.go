@@ -57,6 +57,61 @@ func TestAtMostOneLeaderPerTerm_Chaos(t *testing.T) {
 	}
 }
 
+// TestNoLogDivergence_Chaos — SC7 / REPL-11 (with REPL-10 spirit).
+//
+// Clones the shape of TestAtMostOneLeaderPerTerm_Chaos above (RESEARCH
+// Example 3): the same 100-seed (1000 under TOYRAFT_CHAOS_FULL) × 200-tick
+// × 5-node sweep with the full Hub chaos surface (per-node drop, delay,
+// reorder, duplicate). The invariants under test are the cluster-level
+// safety helpers added in 06-05:
+//
+//   - AssertLogMatching (REPL-11): if two logs share an entry at the same
+//     (index, term), all preceding entries are byte-identical.
+//   - AssertNoCommittedEntryLost (REPL-10 spirit): once an index is
+//     reported committed, no node ever changes the entry at that index.
+//
+// Unlike the leader-only election chaos suite, this test injects REAL log
+// content: whenever a leader exists (guarded by c.HasLeader), it proposes
+// an entry via c.ProposeToLeader so there is something to diverge. Without
+// proposals the logs stay empty and the log-matching invariant is
+// vacuous. The invariants are checked every tick so the earliest seed/tick
+// that breaks safety surfaces immediately (the Fatalf messages carry the
+// seed for bisecting).
+//
+// Gating matches the existing chaos suite exactly: 100 seeds by default
+// (CI budget), 1000 only when !testing.Short() && TOYRAFT_CHAOS_FULL=1.
+func TestNoLogDivergence_Chaos(t *testing.T) {
+	maxSeed := int64(100)
+	if !testing.Short() && os.Getenv("TOYRAFT_CHAOS_FULL") == "1" {
+		maxSeed = 1000
+	}
+
+	for seed := int64(1); seed <= maxSeed; seed++ {
+		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
+			t.Parallel()
+			c := raftest.NewCluster(t, 5, seed)
+			c.Hub.DropRate("n00", 0.10)
+			c.Hub.Delay(1*time.Millisecond, 5*time.Millisecond)
+			c.Hub.Reorder(true, 8)
+			c.Hub.Duplicate(0.05)
+
+			for tick := range 200 {
+				c.Tick(10 * time.Millisecond)
+				// Inject real log content periodically so the log-matching
+				// invariant is non-vacuous. Only propose when a leader
+				// exists (a no-leader propose would be a no-op anyway, but
+				// the guard keeps intent explicit). Every few ticks keeps
+				// the suite fast while still generating churn-worthy logs.
+				if tick%5 == 0 && c.HasLeader() {
+					c.ProposeToLeader([]byte(fmt.Sprintf("op-%d-%d", seed, tick)))
+				}
+				c.AssertLogMatching()
+				c.AssertNoCommittedEntryLost()
+			}
+		})
+	}
+}
+
 // TestStepDownHaltsInFlight — SC4 / ELEC-08 / Pitfall 1 at the
 // Cluster integration layer.
 //
