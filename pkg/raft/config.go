@@ -59,13 +59,14 @@ type Config struct {
 
 	// ElectionTimeoutMin / ElectionTimeoutMax bracket the randomised
 	// election timeout draw (Raft §5.2). Min < Max strictly. Defaults:
-	// 300ms / 600ms.
+	// 150ms / 300ms (LLD §2; RATIFIED decision 1 — see applyDefaults).
 	ElectionTimeoutMin time.Duration
 	ElectionTimeoutMax time.Duration
 
 	// HeartbeatInterval is the leader's heartbeat cadence. P1-5 requires
 	// HeartbeatInterval*3 <= ElectionTimeoutMin so a single dropped
-	// heartbeat does not provoke an election. Default: 100ms.
+	// heartbeat does not provoke an election. Default: 50ms (REPL-01 /
+	// LLD §2; RATIFIED decision 1 — see applyDefaults).
 	HeartbeatInterval time.Duration
 
 	// Seed deterministically seeds the per-node math/rand/v2 RNG that
@@ -97,14 +98,22 @@ type Config struct {
 // Idempotent: re-running over a populated Config is a no-op for each
 // already-set field.
 func (c *Config) applyDefaults() {
+	// RATIFIED decision 1 (locked): defaults are the LLD §2 timings
+	// 50/150/300 ms, NOT the prior 100/300/600. REPL-01 / SC1 lock the
+	// 50 ms heartbeat default, and the LLD §2 pairing gives a comfortable
+	// heartbeat:election ratio of 3x at min and 6x at max. This is a
+	// deliberate spec-alignment fix, not drift. Validate's
+	// HeartbeatInterval*3 <= ElectionTimeoutMin invariant (a frozen
+	// formula) now reads 150 <= 150 at the default — valid at the
+	// boundary; the formula is unchanged.
 	if c.ElectionTimeoutMin == 0 {
-		c.ElectionTimeoutMin = 300 * time.Millisecond
+		c.ElectionTimeoutMin = 150 * time.Millisecond
 	}
 	if c.ElectionTimeoutMax == 0 {
-		c.ElectionTimeoutMax = 600 * time.Millisecond
+		c.ElectionTimeoutMax = 300 * time.Millisecond
 	}
 	if c.HeartbeatInterval == 0 {
-		c.HeartbeatInterval = 100 * time.Millisecond
+		c.HeartbeatInterval = 50 * time.Millisecond
 	}
 	if c.Clock == nil {
 		c.Clock = clock.NewReal()

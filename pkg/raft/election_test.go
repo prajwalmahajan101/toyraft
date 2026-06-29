@@ -49,17 +49,19 @@ func TestFigure7(t *testing.T) {
 	}
 }
 
-// makeElectionConfig builds a Config with the default 300/600/100ms
-// election window. Seed is caller-supplied so tests can pin the per-node
-// RNG draw deterministically (P1-4).
+// makeElectionConfig builds a Config with the default 150/300/50ms
+// election window (LLD §2; RATIFIED decision 1 — see config.applyDefaults).
+// tickInterval == HeartbeatInterval == 50ms, so the election window is
+// 3..6 ticks (150/50 .. 300/50). Seed is caller-supplied so tests can
+// pin the per-node RNG draw deterministically (P1-4).
 func makeElectionConfig(t *testing.T, id NodeID, peers []NodeID, seed int64) *Config {
 	t.Helper()
 	return &Config{
 		ID:                 id,
 		Peers:              peers,
-		ElectionTimeoutMin: 300 * time.Millisecond,
-		ElectionTimeoutMax: 600 * time.Millisecond,
-		HeartbeatInterval:  100 * time.Millisecond,
+		ElectionTimeoutMin: 150 * time.Millisecond,
+		ElectionTimeoutMax: 300 * time.Millisecond,
+		HeartbeatInterval:  50 * time.Millisecond,
 		Seed:               seed,
 		Storage:            fakeStorage{},
 	}
@@ -75,7 +77,7 @@ func mustNewNode(t *testing.T, cfg *Config) *node {
 }
 
 // TestElectionTimeout — SC1. A freshly-started follower with the
-// default election window (300..600ms) and a 100ms HeartbeatInterval
+// default election window (150..300ms) and a 50ms HeartbeatInterval
 // (== tickInterval) MUST promote to Candidate within [3, 6) ticks under
 // MsgTick events.
 //
