@@ -1,0 +1,342 @@
+package raft_test
+
+// figure8_test.go scripts the canonical Raft Figure 8 scenario (paper
+// §5.4.2) end-to-end against the REAL state machine, retiring SC3 /
+// REPL-10: no entry committed by an old leader is ever lost after leader
+// churn, and — the decisive guarantee — once an index is reported
+// committed, no later term ever changes the entry at that index.
+//
+// PACKAGE BOUNDARY (REQUIRED): this file is `package raft_test` (external)
+// because it imports internal/raftest, which imports pkg/raft — an
+// in-package `package raft` test would form an import cycle. It therefore
+// drives the cluster through the EXPORTED raftest.Cluster / raft.TestNode
+// surface only (NewCluster, Leader/NodeByID/ProposeToLeader/Tick/
+// AssertLogMatching/AssertNoCommittedEntryLost and TestNode's
+// Step/Ready/RoleAndTerm/Log/CommitIndex/MatchIndex/NextIndex) — never
+// in-package *node access. Same precedent as invariant_test.go.
+//
+// DETERMINISM STRATEGY: election timeouts are RNG-driven, so naming a
+// SPECIFIC node "S1" and racing it to win is non-reproducible. The Figure
+// 8 SAFETY property does not depend on WHICH node leads each stage — only
+// on the SHAPE of the churn: an old-term entry replicated to a majority
+// must not commit on replica count; it commits only once a current-term
+// entry above it reaches quorum; and a committed entry must survive the
+// subsequent churn. We therefore PARTITION the cluster into controlled
+// groups, let whichever node wins in the connected group lead (discovered
+// by scanning the island for Role=Leader at a fresh term — NOT via the
+// cluster-wide c.Leader(), which can return a stale isolated leader), and
+// track entries by INDEX + TERM rather than by node identity. Partition/
+// Heal + deterministic FakeClock ticks make the whole scenario
+// reproducible at a fixed seed.
+
+import (
+	"testing"
+	"time"
+
+	"github.com/prajwalmahajan101/toyraft/internal/raftest"
+	"github.com/prajwalmahajan101/toyraft/pkg/raft"
+)
+
+// The five node IDs the cluster allocates (n00..n04, zero-padded so lex
+// order == index order — see NewCluster).
+const (
+	n0 = raft.NodeID("n00")
+	n1 = raft.NodeID("n01")
+	n2 = raft.NodeID("n02")
+	n3 = raft.NodeID("n03")
+	n4 = raft.NodeID("n04")
+)
+
+var allNodes = []raft.NodeID{n0, n1, n2, n3, n4}
+
+// connectOnly heals all partitions, then symmetrically partitions every
+// node NOT in `group` away from every other node. The result: `group` is
+// a fully-connected island and every other node is fully isolated. This
+// lets the test pin exactly which nodes can vote / replicate in a given
+// stage. Each call fully resets the partition state first.
+func connectOnly(c *raftest.Cluster, group ...raft.NodeID) {
+	in := make(map[raft.NodeID]bool, len(group))
+	for _, g := range group {
+		in[g] = true
+	}
+	for i := range allNodes {
+		for j := i + 1; j < len(allNodes); j++ {
+			a, b := allNodes[i], allNodes[j]
+			if in[a] && in[b] {
+				c.Hub.Heal(a, b)
+			} else {
+				c.Hub.Partition(a, b)
+			}
+		}
+	}
+}
+
+// driveUntilLeaderIn ticks until some node IN `group` reports Role=Leader
+// AT A TERM > minTerm, checking invariants every tick. Returns the leader
+// ID and its term.
+//
+// Two subtleties this guards against:
+//   - Restricting to `group` is essential: an ISOLATED node from an earlier
+//     stage may still report Role=Leader at its stale term (isolation alone
+//     does not demote it), so a cluster-wide c.Leader() scan would return
+//     the wrong, crashed node.
+//   - The minTerm floor is essential when a stale in-group leader exists: a
+//     node reconnected from an earlier stage may STILL hold Leader at its
+//     old term for a few ticks before it sees a higher-term message and
+//     steps down. We must not accept that stale leadership as "the new
+//     leader" — we wait for a fresh election to produce a leader at a term
+//     strictly above minTerm.
+func driveUntilLeaderIn(t *testing.T, c *raftest.Cluster, minTerm raft.Term, maxTicks int, group ...raft.NodeID) (raft.NodeID, raft.Term) {
+	t.Helper()
+	for range maxTicks {
+		c.Tick(10 * time.Millisecond)
+		c.AssertLogMatching()
+		c.AssertNoCommittedEntryLost()
+		for _, node := range group {
+			role, term := c.NodeByID(node).Node().RoleAndTerm()
+			if role == raft.Leader && term > minTerm {
+				return node, term
+			}
+		}
+	}
+	t.Fatalf("Figure8: no leader emerged in %v at term > %d within %d ticks (seed=%d)",
+		group, minTerm, maxTicks, c.Seed)
+	return "", 0
+}
+
+// driveTicks runs n plain ticks with invariant checks, letting in-flight
+// replication settle (heartbeats, AE responses, commit advance).
+func driveTicks(t *testing.T, c *raftest.Cluster, n int) {
+	t.Helper()
+	for range n {
+		c.Tick(10 * time.Millisecond)
+		c.AssertLogMatching()
+		c.AssertNoCommittedEntryLost()
+	}
+}
+
+// proposeInto proposes op directly into the SPECIFIC node `leader` (the
+// connected island's elected leader, tracked by the test) and fails if it
+// refuses. We target the node explicitly rather than via c.ProposeToLeader
+// /c.Leader(): an isolated leader from an EARLIER stage still reports
+// Role=Leader at its stale term (isolation does not demote it), so a
+// cluster-wide first-leader scan could route the proposal into the wrong,
+// crashed node. The Figure 8 script must inject each entry into the leader
+// of the currently-connected group.
+func proposeInto(t *testing.T, c *raftest.Cluster, stage string, leader raft.NodeID, op string) raft.Index {
+	t.Helper()
+	idx, ok := c.NodeByID(leader).Node().Propose([]byte(op))
+	if !ok {
+		t.Fatalf("Figure8 (%s): Propose(%q) into %s refused — not leader (seed=%d)",
+			stage, op, leader, c.Seed)
+	}
+	return idx
+}
+
+// logTermAt returns the term of the entry at 1-based index idx on node,
+// or 0 if the node's log is shorter than idx.
+func logTermAt(c *raftest.Cluster, node raft.NodeID, idx raft.Index) raft.Term {
+	entries := c.NodeByID(node).Node().Log()
+	if int(idx) > len(entries) {
+		return 0
+	}
+	return entries[idx-1].Term
+}
+
+// commitIndexOf returns node's reported commitIndex.
+func commitIndexOf(c *raftest.Cluster, node raft.NodeID) raft.Index {
+	return c.NodeByID(node).Node().CommitIndex()
+}
+
+// TestFigure8 reproduces the canonical 5-node §5.4.2 scenario and proves
+// the current-term commit rule (REPL-06) prevents the Figure 8 data-loss
+// hole. The decisive assertions:
+//
+//   - A leader holding an OLD-term entry at index-2 replicated to a
+//     majority does NOT report index-2 committed (log[2].term != currentTerm).
+//   - index-2 commits only once the leader replicates a CURRENT-term entry
+//     above it to a quorum — at which point Log Matching carries the
+//     old-term entry to that same quorum and it is safe forever.
+//   - The committed index-2 entry then survives subsequent churn;
+//     AssertNoCommittedEntryLost holds at every tick throughout.
+func TestFigure8(t *testing.T) {
+	c := raftest.NewCluster(t, 5, 12345)
+
+	// ---- Stage (a): with the WHOLE cluster connected, a leader emerges and
+	// commits index-1 to ALL five nodes (the shared baseline every node
+	// carries through the churn). Then shrink the island to {leaderA, keep}
+	// so index-2 reaches an OLD-term minority only (the classic Figure 8
+	// setup: the term-A entry at index-2 lives on a minority that does not
+	// yet commit, because every node already agrees on index-1).
+	connectOnly(c, allNodes...)
+	leaderA, termA := driveUntilLeaderIn(t, c, 0, 200, allNodes...)
+	if termA < 2 {
+		t.Fatalf("Figure8 (a): leaderA=%s term=%d; want >= 2 (seed=%d)", leaderA, termA, c.Seed)
+	}
+
+	// index-1: replicate + commit across all five nodes (shared baseline).
+	proposeInto(t, c, "a/idx1", leaderA, "a-idx1")
+	driveTicks(t, c, 15)
+	for _, node := range allNodes {
+		if logTermAt(c, node, 1) != termA {
+			t.Fatalf("Figure8 (a): node %s missing baseline index-1 (term %d); got %d (seed=%d)",
+				node, termA, logTermAt(c, node, 1), c.Seed)
+		}
+	}
+
+	// Pick a follower to keep with leaderA for the next (minority)
+	// replication: any node that is not leaderA.
+	var keep raft.NodeID
+	for _, cand := range allNodes {
+		if cand != leaderA {
+			keep = cand
+			break
+		}
+	}
+
+	// Shrink to {leaderA, keep}: a 2-node minority of 5. index-2 will be
+	// appended to leaderA's log and replicated only to `keep` — never a
+	// quorum — so it CANNOT commit during term A. leaderA stays leader
+	// (it does not hear from a higher term while partitioned this briefly).
+	connectOnly(c, leaderA, keep)
+	idx2 := proposeInto(t, c, "a/idx2", leaderA, "a-idx2-oldterm")
+	if idx2 != 2 {
+		t.Fatalf("Figure8 (a): index-2 entry assigned index %d; want 2 (seed=%d)", idx2, c.Seed)
+	}
+	driveTicks(t, c, 8)
+
+	// leaderA holds an OLD-term (term-A) entry at index-2 on a minority.
+	if got := logTermAt(c, leaderA, 2); got != termA {
+		t.Fatalf("Figure8 (a): leaderA log[2].term=%d; want %d (old-term entry) (seed=%d)",
+			got, termA, c.Seed)
+	}
+	// It is NOT committed (minority only).
+	if ci := commitIndexOf(c, leaderA); ci >= 2 {
+		t.Fatalf("Figure8 (a): leaderA committed index %d >= 2 on a MINORITY — impossible (seed=%d)",
+			ci, c.Seed)
+	}
+
+	// ---- Stage (b): leaderA + keep "crash" (isolated). The OTHER three
+	// nodes {the rest} elect a new leader at a HIGHER term and accept a
+	// DIFFERENT entry at index-2 locally. This is the divergent index-2.
+	rest := make([]raft.NodeID, 0, 3)
+	for _, x := range allNodes {
+		if x != leaderA && x != keep {
+			rest = append(rest, x)
+		}
+	}
+	connectOnly(c, rest...) // {leaderA, keep} now fully isolated ("crashed")
+	leaderB, termB := driveUntilLeaderIn(t, c, termA, 200, rest...)
+	if termB <= termA {
+		t.Fatalf("Figure8 (b): leaderB=%s term=%d; want > %d (seed=%d)",
+			leaderB, termB, termA, c.Seed)
+	}
+	// Designate the third rest node — the one that is NEITHER leaderB nor
+	// the partner we keep with leaderB — as the "clean" node: it stays
+	// connected during the election (so leaderB can win a quorum) but the
+	// divergent term-B index-2 entry is proposed only AFTER we shrink to
+	// {leaderB, bPartner}, so the clean node NEVER receives a term-B
+	// index-2. Its index-2 stays empty, exactly like S3 in the paper. That
+	// lets leaderA (with its old term-A index-2) win stage (c) by the
+	// election restriction.
+	var bPartner, clean raft.NodeID
+	for _, x := range rest {
+		if x == leaderB {
+			continue
+		}
+		if bPartner == "" {
+			bPartner = x
+		} else {
+			clean = x
+		}
+	}
+	// Shrink leaderB's island to {leaderB, bPartner}: a minority. The
+	// divergent term-B index-2 reaches only these two; it never commits and
+	// `clean` never sees it.
+	connectOnly(c, leaderB, bPartner)
+	proposeInto(t, c, "b/idx2", leaderB, "b-idx2-diff")
+	driveTicks(t, c, 10)
+	if got := logTermAt(c, leaderB, 2); got != termB {
+		t.Fatalf("Figure8 (b): leaderB log[2].term=%d; want %d (divergent entry) (seed=%d)",
+			got, termB, c.Seed)
+	}
+	if got := logTermAt(c, clean, 2); got != 0 {
+		t.Fatalf("Figure8 (b): clean node %s unexpectedly has index-2 (term %d); "+
+			"the divergent entry leaked to the stage-(c) third node (seed=%d)",
+			clean, got, c.Seed)
+	}
+
+	// ---- Stage (c): leaderB + bPartner "crash"; leaderA + keep are
+	// restored and joined with `clean` (whose index-2 is empty), forming the
+	// majority {leaderA, keep, clean}. leaderA (carrying the OLD term-A
+	// index-2 entry) is at least as up-to-date as clean, so it can win an
+	// election at a term > B, then replicates its old term-A index-2 entry
+	// to this majority. DECISIVE: it must NOT commit index-2 on replica
+	// count (log[2].term == termA != currentTerm).
+	connectOnly(c, leaderA, keep, clean)
+	leaderC, termC := driveUntilLeaderIn(t, c, termB, 400, leaderA, keep, clean)
+	if termC <= termB {
+		t.Fatalf("Figure8 (c): leaderC=%s term=%d; want > %d (seed=%d)",
+			leaderC, termC, termB, c.Seed)
+	}
+	// Let the new leader replicate its existing log (incl. the old-term
+	// index-2 entry, if it holds it) across the majority. No new proposal.
+	driveTicks(t, c, 25)
+
+	// The decisive check is meaningful only when the elected leader carries
+	// the old-term index-2 entry (leaderA or keep). The election restriction
+	// (§5.4.1) guarantees the winner's log is at least as up-to-date as a
+	// majority; since `clean` has no index-2, leaderA/keep are eligible.
+	if logTermAt(c, leaderC, 2) != termA {
+		t.Fatalf("Figure8 (c): leaderC=%s log[2].term=%d; want the OLD term %d — the "+
+			"election restriction should have elected a holder of the old-term entry (seed=%d)",
+			leaderC, logTermAt(c, leaderC, 2), termA, c.Seed)
+	}
+	// leaderC holds the old-term index-2 entry, replicated to the majority.
+	// It must NOT have committed it by replica count.
+	if ci := commitIndexOf(c, leaderC); ci >= 2 {
+		t.Fatalf("Figure8 (c): leaderC committed index %d >= 2 on a PRIOR-term "+
+			"entry (term %d != currentTerm %d) — REPL-06 Figure-8 violation; the "+
+			"committed entry could later be lost (seed=%d)", ci, termA, termC, c.Seed)
+	}
+
+	// ---- Stage (d): leaderC replicates a CURRENT-term (termC) entry above
+	// index-2 to the majority. NOW index-2 commits indirectly (Log Matching
+	// carries the earlier entries to the same quorum). Record it committed.
+	proposeInto(t, c, "d/current", leaderC, "c-idx-current")
+	driveTicks(t, c, 25)
+
+	committedCI := commitIndexOf(c, leaderC)
+	if committedCI < 2 {
+		t.Fatalf("Figure8 (d): leaderC commitIndex=%d; want >= 2 (a current-term entry "+
+			"above index-2 reached quorum, so index-2 commits indirectly) (seed=%d)",
+			committedCI, c.Seed)
+	}
+	// AssertNoCommittedEntryLost has now recorded indices 1..committedCI as
+	// the immutable committed entries.
+	c.AssertNoCommittedEntryLost()
+	committedIdx2Term := logTermAt(c, leaderC, 2)
+
+	// ---- Stage (e): churn again — fully reconnect the cluster and let any
+	// node attempt re-election. With index-2 committed on a majority, the
+	// election restriction prevents any node with a conflicting / shorter
+	// log from winning and overwriting it. The committed index-2 entry must
+	// NEVER change. AssertNoCommittedEntryLost runs every tick below.
+	connectOnly(c, allNodes...) // heal everything
+	driveTicks(t, c, 40)
+
+	// Final explicit check: index-2 is unchanged on every node that holds a
+	// committed entry there. (AssertNoCommittedEntryLost already enforced
+	// this continuously; this is the human-readable SC3 assertion.)
+	for _, node := range allNodes {
+		ci := commitIndexOf(c, node)
+		if ci >= 2 {
+			if got := logTermAt(c, node, 2); got != committedIdx2Term {
+				t.Fatalf("Figure8 (e): node %s reports index-2 committed but its term=%d; "+
+					"committed entry was term %d — a committed entry was overwritten after "+
+					"churn (SC3/REPL-10 violation) (seed=%d)",
+					node, got, committedIdx2Term, c.Seed)
+			}
+		}
+	}
+}
