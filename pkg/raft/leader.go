@@ -78,14 +78,34 @@ func (n *node) sendAppendEntriesLocked(peer NodeID) {
 //
 // matchIndex[self] is set so the commit-rule snapshot (06-03) counts the
 // leader's own copy without special-casing self.
+//
+// RATIFIED decision 2 (P0-4 final / REPL-09): the proposed entry is
+// mirrored into the durable local Storage subset BEFORE the leader marks
+// it locally replicated (matchIndex[self]=idx) and BEFORE the next
+// tickLeaderLocked can fan out an AppendEntries that carries it. n.log
+// stays the fast in-memory read path; n.storage is the durable mirror.
+// If the mirror fails the entry is NOT advertised as replicated — we roll
+// the in-memory append back and return (0,false) rather than silently
+// shipping durability we never achieved (global rule: no failure-hiding
+// fallback). The pkg/raft.Storage vs pkg/storage.Storage duplication is
+// deliberately NOT reconciled here (Phase 7 ADR).
 func (n *node) proposeLocked(data []byte) (Index, bool) {
 	if n.role != Leader {
 		return 0, false
 	}
 	idx := n.log.LastIndex() + 1
-	n.log.Append(Entry{Term: n.currentTerm, Index: idx, Data: data})
+	entry := Entry{Term: n.currentTerm, Index: idx, Data: data}
+	n.log.Append(entry)
+	if err := n.storage.Append([]Entry{entry}); err != nil {
+		// Durable mirror failed: undo the in-memory append so n.log and
+		// n.storage stay in lockstep, log, and report failure. The caller
+		// MUST NOT treat the entry as accepted.
+		n.log.TruncateSuffix(idx)
+		n.log2.Error("raft: proposeLocked storage mirror failed",
+			"index", idx, "term", n.currentTerm, "err", err)
+		return 0, false
+	}
 	n.matchIndex[n.id] = idx // leader's own entry is locally replicated
-	// Storage mirror added in 06-04 (P0-4 final).
 	return idx, true
 }
 
