@@ -1,7 +1,25 @@
 # ToyRaft Makefile
 # More targets land in later phases (build, test, demo) — see ROADMAP.md.
 
-.PHONY: hooks lld-drift lld-drift-update check-no-time-now verify
+# N is the demo cluster size. It MUST be odd — raft.Config.Peers Validate
+# hard-errors on even N (a clean majority needs an odd member count). The demo
+# target guards this BEFORE launching anything.
+N ?= 3
+
+.PHONY: hooks lld-drift lld-drift-update check-no-time-now verify build-demo demo
+
+# build-demo compiles both reference binaries into bin/ (gitignored). The demo
+# target depends on it so `make demo` is one command from a clean tree.
+build-demo:
+	go build -o bin/toyraftd ./cmd/toyraftd
+	go build -o bin/toyraftctl ./cmd/toyraftctl
+
+# demo boots an N-node cluster and runs the end-to-end smoke test (SC1/SC5/SC6).
+# Client ports 9001..900N, peer ports 7001..700N. `make demo N=5` scales up;
+# even N is rejected fast, before any process starts.
+demo: build-demo
+	@[ $$(( $(N) % 2 )) -eq 1 ] || { echo "N must be odd (got $(N))"; exit 1; }
+	N=$(N) bash scripts/smoke.sh
 
 hooks:
 	@chmod +x .githooks/*
