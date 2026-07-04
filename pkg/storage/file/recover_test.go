@@ -149,3 +149,223 @@ func statSize(t *testing.T, path string) int64 {
 	}
 	return fi.Size()
 }
+
+// TestAppendFsyncCrash proves SC3/STOR-04 with the faultVFS page-cache fake: an
+// entry whose active-segment fsync was suppressed (killed after Write, before
+// the fsync landed) is ABSENT after a Crash + reopen, while a fully-synced
+// Append survives the same Crash.
+//
+// NON-VACUOUSNESS (T-6/Pitfall 3): deleting the `activeFile.Sync()` call from
+// Append (file.go) makes the ABSENT assertion below fail — the suppressed write
+// would then be treated as durable. That is the proof this test is real, not a
+// clean-shutdown flush. Verified by hand during 08-05 execution.
+func TestAppendFsyncCrash(t *testing.T) {
+	fs := newFaultVFS()
+	dir := t.TempDir()
+
+	s, err := openWith(fs, dir)
+	if err != nil {
+		t.Fatalf("openWith: %v", err)
+	}
+	// E1: a NORMAL, fully-synced append — creates the segment and makes its
+	// header + record durable so the reopen has a valid segment to recover.
+	e1 := raft.Entry{Term: 1, Index: 1, Data: []byte("committed")}
+	if err := s.Append([]raft.Entry{e1}); err != nil {
+		t.Fatalf("Append e1: %v", err)
+	}
+
+	// E2: arm suppressNextSync so Append's activeFile.Sync() is a no-op — E2's
+	// bytes stay in the unsynced (dirty-page) buffer. Append still returns nil
+	// (it believes it synced); a real process would be killed here.
+	fs.suppressNextSync = true
+	e2 := raft.Entry{Term: 1, Index: 2, Data: []byte("lost")}
+	if err := s.Append([]raft.Entry{e2}); err != nil {
+		t.Fatalf("Append e2 (suppressed sync): %v", err)
+	}
+
+	// Power loss: drop every unsynced byte.
+	fs.Crash()
+
+	// Reopen on the SAME faultVFS: recovery sees only durable bytes.
+	s2, err := openWith(fs, dir)
+	if err != nil {
+		t.Fatalf("reopen after crash: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+
+	last, err := s2.LastIndex()
+	if err != nil {
+		t.Fatalf("LastIndex: %v", err)
+	}
+	if last != 1 {
+		t.Fatalf("after fsync-crash, LastIndex=%d, want 1 (E2 must be ABSENT)", last)
+	}
+	got, err := s2.Entries(1, 2)
+	if err != nil {
+		t.Fatalf("Entries(1,2): %v", err)
+	}
+	if len(got) != 1 || got[0].Index != 1 || string(got[0].Data) != "committed" {
+		t.Fatalf("recovered %+v, want exactly [E1 committed]", got)
+	}
+}
+
+// TestAppendSyncedSurvivesCrash is the non-vacuous POSITIVE control for SC3: a
+// fully-synced Append survives a Crash, proving Crash() does not simply wipe
+// everything (which would make TestAppendFsyncCrash pass vacuously).
+func TestAppendSyncedSurvivesCrash(t *testing.T) {
+	fs := newFaultVFS()
+	dir := t.TempDir()
+
+	s, err := openWith(fs, dir)
+	if err != nil {
+		t.Fatalf("openWith: %v", err)
+	}
+	e := raft.Entry{Term: 2, Index: 1, Data: []byte("durable")}
+	if err := s.Append([]raft.Entry{e}); err != nil { // normal Sync completes
+		t.Fatalf("Append: %v", err)
+	}
+
+	fs.Crash() // the synced write must survive
+
+	s2, err := openWith(fs, dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+
+	last, err := s2.LastIndex()
+	if err != nil {
+		t.Fatalf("LastIndex: %v", err)
+	}
+	if last != 1 {
+		t.Fatalf("synced entry lost across Crash: LastIndex=%d, want 1", last)
+	}
+	got, err := s2.Entries(1, 2)
+	if err != nil {
+		t.Fatalf("Entries: %v", err)
+	}
+	if len(got) != 1 || got[0].Term != 2 || string(got[0].Data) != "durable" {
+		t.Fatalf("recovered %+v, want [E durable term=2]", got)
+	}
+}
+
+// TestHardStateRenameCrash proves SC4/STOR-05: a crash BETWEEN the tmp
+// Write+Sync and the atomic Rename leaves the PREVIOUS HardState intact — the
+// orphan tmp never corrupts the read path (LoadHardState reads only the final
+// file). The completed-save positive control shows the new state lands when the
+// Rename+SyncDir do run.
+func TestHardStateRenameCrash(t *testing.T) {
+	fs := newFaultVFS()
+	dir := t.TempDir()
+
+	s, err := openWith(fs, dir)
+	if err != nil {
+		t.Fatalf("openWith: %v", err)
+	}
+	hsPrev := raft.HardState{CurrentTerm: 3, VotedFor: "n1", Commit: 5}
+	if err := s.SaveHardState(hsPrev); err != nil { // fully durable
+		t.Fatalf("SaveHardState hsPrev: %v", err)
+	}
+
+	// Arm the crash at the NEXT Rename: SaveHardState will Create+Write+Sync the
+	// tmp, then die at the rename(2) syscall. The returned error is expected
+	// (the process "died") and intentionally ignored.
+	fs.crashBeforeNextRename = true
+	hsNew := raft.HardState{CurrentTerm: 4, VotedFor: "n2", Commit: 9}
+	_ = s.SaveHardState(hsNew) // errors at Rename; the store has "crashed"
+
+	// Reopen: LoadHardState must read the PREVIOUS state; the orphan tmp is gone.
+	s2, err := openWith(fs, dir)
+	if err != nil {
+		t.Fatalf("reopen after rename-crash: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+
+	got, err := s2.LoadHardState()
+	if err != nil {
+		t.Fatalf("LoadHardState after rename-crash: %v", err)
+	}
+	if got != hsPrev {
+		t.Fatalf("after rename-crash LoadHardState=%+v, want previous %+v", got, hsPrev)
+	}
+
+	// POSITIVE control: a COMPLETED SaveHardState(hsNew) + Crash yields hsNew.
+	if err := s2.SaveHardState(hsNew); err != nil {
+		t.Fatalf("SaveHardState hsNew (completed): %v", err)
+	}
+	fs.Crash()
+	s3, err := openWith(fs, dir)
+	if err != nil {
+		t.Fatalf("reopen after completed save: %v", err)
+	}
+	defer func() { _ = s3.Close() }()
+	got2, err := s3.LoadHardState()
+	if err != nil {
+		t.Fatalf("LoadHardState after completed save: %v", err)
+	}
+	if got2 != hsNew {
+		t.Fatalf("after completed save LoadHardState=%+v, want %+v", got2, hsNew)
+	}
+}
+
+// TestRolloverDirFsync proves SC5/Per-3: a segment rollover fsyncs the parent
+// directory (SyncDir) BEFORE the Append that triggered it returns, so the new
+// segment's directory entry is durable before the entry is acked. It also shows
+// the rolled-over entry survives a Crash after its Append+Sync.
+func TestRolloverDirFsync(t *testing.T) {
+	fs := newFaultVFS()
+	dir := t.TempDir()
+
+	s, err := openWith(fs, dir)
+	if err != nil {
+		t.Fatalf("openWith: %v", err)
+	}
+	// Force a rollover on every entry after the first: one entry per segment.
+	s.mu.Lock()
+	s.maxEntriesPerSegment = 1
+	s.mu.Unlock()
+
+	// First Append creates segment 1 (one SyncDir on create).
+	if err := s.Append([]raft.Entry{{Term: 1, Index: 1, Data: []byte("a")}}); err != nil {
+		t.Fatalf("Append 1: %v", err)
+	}
+
+	// Record the spy, then do the Append that rolls into segment 2. The rollover
+	// SyncDir must have run BY THE TIME this Append returns.
+	fs.mu.Lock()
+	before := fs.syncDirCount
+	fs.mu.Unlock()
+
+	if err := s.Append([]raft.Entry{{Term: 1, Index: 2, Data: []byte("b")}}); err != nil {
+		t.Fatalf("Append 2 (rollover): %v", err)
+	}
+
+	fs.mu.Lock()
+	after := fs.syncDirCount
+	fs.mu.Unlock()
+	if after <= before {
+		t.Fatalf("rollover did not SyncDir before Append returned: syncDirCount %d -> %d", before, after)
+	}
+
+	// The rolled-over entry (Append+Sync completed) survives a Crash.
+	fs.Crash()
+	s2, err := openWith(fs, dir)
+	if err != nil {
+		t.Fatalf("reopen after rollover crash: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+	last, err := s2.LastIndex()
+	if err != nil {
+		t.Fatalf("LastIndex: %v", err)
+	}
+	if last != 2 {
+		t.Fatalf("after rollover crash LastIndex=%d, want 2 (both entries durable)", last)
+	}
+	got, err := s2.Entries(1, 3)
+	if err != nil {
+		t.Fatalf("Entries(1,3): %v", err)
+	}
+	if len(got) != 2 || string(got[0].Data) != "a" || string(got[1].Data) != "b" {
+		t.Fatalf("recovered %+v, want [a b] across two segments", got)
+	}
+}
