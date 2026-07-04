@@ -212,7 +212,7 @@ func run() error {
 // book. It rejects empty entries, missing '=', and duplicate IDs.
 func parsePeers(spec string) (map[raft.NodeID]string, error) {
 	out := make(map[raft.NodeID]string)
-	for _, part := range strings.Split(spec, ",") {
+	for part := range strings.SplitSeq(spec, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
