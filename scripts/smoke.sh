@@ -194,9 +194,10 @@ echo "partitioning leader n${LEADER} (kill -STOP) — expecting a new leader"
 kill -STOP "${PIDS[$LEADER]}" || fail "could not STOP leader pid ${PIDS[$LEADER]}"
 
 NEW=""
-# ~8s ceiling. The steady-state re-election is well under ~1.5s, but the
-# daemon's per-Send backoff to the now-frozen leader (SendTimeout 1s) briefly
-# stalls a campaigner's tick loop, so allow generous headroom to stay flake-free.
+# ~8s ceiling. The steady-state re-election is well under ~1.5s, but a
+# campaigner's tick loop can still take a single bounded Send hit against the
+# now-frozen leader (SendTimeout 150ms, 1 attempt), so allow generous headroom
+# to stay flake-free.
 deadline=$(( $(now_ns) + 8000000000 ))
 while [ "$(now_ns)" -lt "$deadline" ]; do
     for (( i = 0; i < N; i++ )); do
