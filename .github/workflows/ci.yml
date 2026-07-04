@@ -70,7 +70,25 @@ jobs:
         run: go vet ./...
 
       - name: go test -race
-        run: go test -race -timeout 5m ./...
+        # Excludes ./test/chaos/... — that tree is run by the dedicated
+        # chaos step below so it isn't swept twice per matrix cell (the
+        # process-kill harness boots 5 real daemons under -race, which is
+        # slow on macOS runners). Making the chaos step the single source
+        # also gives clean failure attribution.
+        run: go test -race -timeout 5m $(go list ./... | grep -v '/test/chaos/')
+
+      - name: Chaos suite (seeded inproc matrix + process-kill — CHAOS-07/SC5)
+        # Phase 11 SC5: a chaos failure is TERMINAL and fails the build on
+        # the first occurrence. This step is deliberately plain — no
+        # conditional guard, no failure-tolerating modifier, no re-run loop:
+        # masking a chaos flake would hide the very linearizability bug that
+        # Phase 12 exists to catch. Runs on BOTH matrix OSes: the inproc
+        # matrix is pure in-memory; the process-kill harness is
+        # //go:build linux || darwin and both matrix OSes (ubuntu + macos)
+        # are POSIX, so it runs on each. The step lives inside the existing
+        # `test` job so no new required-status-check name is introduced
+        # (ADR-0002 + branch protection unchanged).
+        run: go test -race -timeout 10m ./test/chaos/...
 
       - name: Test (raftdebug build tag — invariant negative tests)
         # Per ADR-0004 + .planning/phases/02-foundations/02-RESEARCH.md §6.3 /
