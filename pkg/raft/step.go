@@ -57,6 +57,17 @@ func (n *node) stepLocked(m Message) error {
 // lets Ready() (plan 05-04) discard messages queued under a prior role
 // — ELEC-08 / P0-5. Caller MUST hold n.mu.
 func (n *node) queueMsgLocked(m Message) {
+	// OBS-02 / SC1: one Debug line per outbound RPC carrying the exact field set
+	// (from,to,term,type,lastLogIndex). queueMsgLocked is the SINGLE outbound seam
+	// every wire message flows through with all fields populated, so logging here
+	// covers RequestVote + AppendEntries fan-out without touching call sites.
+	// MUST stay at Debug (per-RPC volume; default DiscardHandler = zero cost).
+	// MsgTick is internal-only and never queued for the wire, but guard anyway so
+	// a stray tick can never emit a spurious "rpc send" line.
+	if m.Type != MsgTick {
+		n.log2.Debug("raft: rpc send",
+			"from", m.From, "to", m.To, "term", m.Term, "type", m.Type, "lastLogIndex", m.LastLogIndex)
+	}
 	n.pendingMsgs = append(n.pendingMsgs, pendingMsg{epoch: n.stepDownEpoch, msg: m})
 }
 

@@ -7,6 +7,8 @@
 // See docs/LLD.md Global Invariant 2.
 package raft
 
+import "fmt"
+
 // NodeID is a stable, human-readable identifier for a cluster member.
 // Must be non-empty, unique across Config.Peers, and stable across restarts.
 type NodeID string
@@ -59,6 +61,27 @@ const (
 
 	MsgTick MessageType = 255 // internal-only; not wire-visible
 )
+
+// String renders a MessageType as a human-readable label for the log `type`
+// field (observability, OBS-02) — a raw uint8 is opaque in a log line. The
+// mapping mirrors the frozen wire values; unknown values fall back to
+// MsgType(N) so a Phase-6 type widening surfaces legibly rather than silently.
+func (t MessageType) String() string {
+	switch t {
+	case MsgRequestVote:
+		return "RequestVote"
+	case MsgRequestVoteResponse:
+		return "RequestVoteResponse"
+	case MsgAppendEntries:
+		return "AppendEntries"
+	case MsgAppendEntriesResp:
+		return "AppendEntriesResp"
+	case MsgTick:
+		return "Tick"
+	default:
+		return fmt.Sprintf("MsgType(%d)", uint8(t))
+	}
+}
 
 // Message is the on-the-wire and in-process Raft RPC envelope.
 //

@@ -26,6 +26,7 @@ func (n *node) quorum() int {
 func (n *node) becomeCandidateLocked() {
 	n.role = Candidate
 	n.currentTerm++
+	n.log2.Info("raft: role transition", "role", "candidate", "term", n.currentTerm, "id", n.id)
 	n.votedFor = n.id
 	n.leaderHint = ""
 	n.votesReceived = map[NodeID]bool{n.id: true}
