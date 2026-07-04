@@ -3,6 +3,7 @@ package file
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -443,14 +444,94 @@ func (s *Storage) TruncateSuffix(from raft.Index) error {
 	return nil
 }
 
-// Entries is a temporary stub replaced by Task 3 of this plan.
-func (s *Storage) Entries(lo, hi raft.Index) ([]raft.Entry, error) { return nil, nil }
+// LastIndex returns the largest logical index in the log, or 0 if empty
+// (LLD §3). Matches the memory impl exactly.
+func (s *Storage) LastIndex() (raft.Index, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastIndexLocked(), nil
+}
 
-// Term is a temporary stub replaced by Task 3 of this plan.
-func (s *Storage) Term(index raft.Index) (raft.Term, error) { return 0, nil }
+// FirstIndex returns 1 always — v1 has no compaction (LLD §3), matching the
+// memory impl.
+func (s *Storage) FirstIndex() (raft.Index, error) {
+	return 1, nil
+}
 
-// FirstIndex is a temporary stub replaced by Task 3 of this plan.
-func (s *Storage) FirstIndex() (raft.Index, error) { return 1, nil }
+// Term returns the term of the entry at index, or 0 if index == 0 (the
+// implicit pre-log sentinel). Returns an error wrapping io.ErrUnexpectedEOF
+// if index > LastIndex() — the exact memory contract (08-RESEARCH §1). The
+// term is served from the in-RAM index (no disk read needed).
+func (s *Storage) Term(index raft.Index) (raft.Term, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-// LastIndex is a temporary stub replaced by Task 3 of this plan.
-func (s *Storage) LastIndex() (raft.Index, error) { return 0, nil }
+	if index == 0 {
+		return 0, nil
+	}
+	last := s.lastIndexLocked()
+	if index > last {
+		return 0, fmt.Errorf("file storage: term at index %d > LastIndex %d: %w", index, last, io.ErrUnexpectedEOF)
+	}
+	return s.idx[index-1].term, nil
+}
+
+// Entries returns the half-open range [lo, hi) (LLD §3), reading each record's
+// payload from disk via ReaderAt so the returned entries are freshly
+// allocated with fresh Data — the caller may mutate freely (conformance
+// EntriesCallerCanMutate; 08-RESEARCH Open Question 2). Error contract mirrors
+// memory exactly: lo < 1 || lo > hi is invalid; hi > LastIndex()+1 wraps
+// io.ErrUnexpectedEOF; lo == hi returns an empty non-nil slice.
+func (s *Storage) Entries(lo, hi raft.Index) ([]raft.Entry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	last := s.lastIndexLocked()
+	if lo < 1 || lo > hi {
+		return nil, fmt.Errorf("file storage: invalid range [%d,%d)", lo, hi)
+	}
+	if hi > last+1 {
+		return nil, fmt.Errorf("file storage: hi=%d > LastIndex+1=%d: %w", hi, last+1, io.ErrUnexpectedEOF)
+	}
+	if lo == hi {
+		return []raft.Entry{}, nil
+	}
+
+	out := make([]raft.Entry, 0, hi-lo)
+	for i := lo; i < hi; i++ {
+		e, err := s.readEntryLocked(s.idx[i-1])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+// readEntryLocked reads and decodes the record described by ie from disk. The
+// decoded Entry.Data is a fresh copy (decodeRecord deep-copies), so the caller
+// may mutate it. Caller holds s.mu.
+func (s *Storage) readEntryLocked(ie idxEntry) (raft.Entry, error) {
+	f, err := s.fs.Open(s.path(ie.segment))
+	if err != nil {
+		return raft.Entry{}, fmt.Errorf("file storage: open segment %q for read: %w", ie.segment, err)
+	}
+	defer func() { _ = f.Close() }() // read-only handle: Close error is not a durability failure
+
+	// Read the actual on-disk record header (immediately before the payload)
+	// so decodeRecord's CRC check verifies the bytes on disk, not a header we
+	// synthesised — a silent bit-flip in the payload is thus caught on read.
+	var hdr [recHeaderLen]byte
+	if _, err := f.ReadAt(hdr[:], ie.offset-recHeaderLen); err != nil {
+		return raft.Entry{}, fmt.Errorf("file storage: read header for entry %d from %q: %w", ie.index, ie.segment, err)
+	}
+	payload := make([]byte, ie.length)
+	if _, err := f.ReadAt(payload, ie.offset); err != nil {
+		return raft.Entry{}, fmt.Errorf("file storage: read entry %d from %q: %w", ie.index, ie.segment, err)
+	}
+	e, err := decodeRecord(hdr[:], payload)
+	if err != nil {
+		return raft.Entry{}, fmt.Errorf("file storage: decode entry %d from %q: %w", ie.index, ie.segment, err)
+	}
+	return e, nil
+}
