@@ -131,7 +131,7 @@ func TestConcurrentApplyAndGet(t *testing.T) {
 	// Writer: hammer Apply(setOp) from the single-apply-goroutine role.
 	go func() {
 		defer wg.Done()
-		for i := 0; i < iters; i++ {
+		for range iters {
 			if _, err := k.Apply(setOp(t, "k", []byte("v"))); err != nil {
 				t.Errorf("concurrent Apply: %v", err)
 				return
@@ -142,7 +142,7 @@ func TestConcurrentApplyAndGet(t *testing.T) {
 	// Reader: hammer Get from the client-API-goroutine role.
 	go func() {
 		defer wg.Done()
-		for i := 0; i < iters; i++ {
+		for range iters {
 			k.Get("k")
 		}
 	}()
