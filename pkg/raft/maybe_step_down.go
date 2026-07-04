@@ -32,6 +32,7 @@ func (n *node) maybeStepDownLocked(rpcTerm Term) {
 	n.currentTerm = rpcTerm
 	n.votedFor = ""
 	n.role = Follower
+	n.log2.Info("raft: role transition", "role", "follower", "term", n.currentTerm, "id", n.id)
 	n.leaderHint = ""
 	n.votesReceived = nil
 	n.stepDownEpoch++

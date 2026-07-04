@@ -22,6 +22,7 @@ package raft
 // and keep the map shape uniform for the commit-rule iteration.
 func (n *node) becomeLeaderLocked() {
 	n.role = Leader
+	n.log2.Info("raft: role transition", "role", "leader", "term", n.currentTerm, "id", n.id)
 	n.leaderHint = n.id
 	nextIdx := n.log.LastIndex() + 1
 	for _, peer := range n.peers {
