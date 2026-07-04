@@ -83,7 +83,7 @@ func (c *client) Send(ctx context.Context, msg raft.Message) error {
 	attempts := max(c.cfg.Backoff.MaxAttempts, 1)
 
 	var lastErr error
-	for attempt := 0; attempt < attempts; attempt++ {
+	for attempt := range attempts {
 		if attempt > 0 {
 			// Backoff sleep BEFORE this retry. Always select on ctx.Done() so
 			// Send never blocks indefinitely (RESEARCH Pitfall 6).

@@ -14,6 +14,9 @@
 # Targets:
 #   pkg/raft               — core Raft state machine (lands in Phase 5+)
 #   pkg/transport/inproc   — Hub + dispatcher; must take Clock from cfg
+#   pkg/transport/http     — HTTP transport; all timing via cfg.Clock, the
+#                            per-request deadline via context.WithTimeout
+#                            only (RESEARCH Open Q4 / Pitfall 1)
 #   internal/raftest       — cluster harness; FakeClock-derived nanos
 #                            for HistoryEvent (lands in plan 04-05)
 #
@@ -27,6 +30,7 @@ set -euo pipefail
 TARGETS=(
     pkg/raft
     pkg/transport/inproc
+    pkg/transport/http
     internal/raftest
 )
 

@@ -14,7 +14,8 @@
 //
 // This package uses only net/http and the standard library; it pulls in no
 // external HTTP framework. All timing is routed through internal/clock.Clock —
-// there is no direct time.Now() anywhere in the transport (see config.go).
+// the transport reads the wall clock only via that seam (see config.go), which
+// scripts/check-no-time-now.sh enforces for pkg/transport/http.
 //
 // See docs/WIRE.md for the authoritative frame and error-sentinel tables and
 // docs/adr/0015-http-transport-config-address-book.md for the Config surface.

@@ -138,7 +138,7 @@ func TestNoExternalHTTPDeps(t *testing.T) {
 func splitLines(s string) []string {
 	var out []string
 	start := 0
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if s[i] == '\n' {
 			if i > start {
 				out = append(out, s[start:i])
