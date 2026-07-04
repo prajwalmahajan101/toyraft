@@ -10,10 +10,11 @@
 // real dial/timeout/reconnect behaviour is exercised across distinct L3 addresses.
 //
 // LOAD-BEARING SAFETY DECISION: this harness drives netns from `ip`/`iptables`
-// SUBPROCESSES, NEVER in-process `setns`/CLONE_NEWNET. In Go a network namespace is a
-// per-OS-thread property, but goroutines migrate across threads freely, so an
-// in-process setns is the classic Go-scheduler<->thread<->namespace footgun (RESEARCH
-// REJECTED table). Every topology mutation is an `ip`/`iptables` argv run via run().
+// SUBPROCESSES, NEVER via the in-process namespace-join syscall. In Go a network
+// namespace is a per-OS-thread property, but goroutines migrate across threads freely,
+// so joining a namespace in-process is the classic Go-scheduler<->thread<->namespace
+// footgun (RESEARCH REJECTED table). Every topology mutation is an `ip`/`iptables` argv
+// run via run().
 //
 // Daemon needs NO code change: cmd/toyraftd binds arbitrary -peers/-listen host:port
 // (main.go derives every url from -peers), so passing namespace IPs like
@@ -383,12 +384,33 @@ func (h *harness) getKV(leaderClientAddr, k string) (string, error) {
 	}
 }
 
+// partition severs EXACTLY the link between the nodes at indices a and b by installing
+// per-namespace DROP rules INSIDE each victim's own namespace (RESEARCH Pattern 3): a
+// drops b's IP on INPUT+OUTPUT and b drops a's, so the a<->b link is cut while the third
+// node keeps quorum. Rules are per-namespace so they never touch the bridge or the third
+// node (Anti-pattern: NEVER partition in the root/bridge ns). The same `iptables` binary
+// on PATH is used for -A here and -D in heal (Pitfall 2 — never mix nft/legacy).
+func (h *harness) partition(a, b int) {
+	h.run(h.t, "sudo", "ip", "netns", "exec", h.nss[a], "iptables", "-A", "INPUT", "-s", h.ips[b], "-j", "DROP")
+	h.run(h.t, "sudo", "ip", "netns", "exec", h.nss[a], "iptables", "-A", "OUTPUT", "-d", h.ips[b], "-j", "DROP")
+	h.run(h.t, "sudo", "ip", "netns", "exec", h.nss[b], "iptables", "-A", "INPUT", "-s", h.ips[a], "-j", "DROP")
+	h.run(h.t, "sudo", "ip", "netns", "exec", h.nss[b], "iptables", "-A", "OUTPUT", "-d", h.ips[a], "-j", "DROP")
+}
+
+// heal restores the a<->b link by deleting the SAME four DROP rules partition added
+// (-D instead of -A), via the same iptables binary on PATH (Pitfall 2).
+func (h *harness) heal(a, b int) {
+	h.run(h.t, "sudo", "ip", "netns", "exec", h.nss[a], "iptables", "-D", "INPUT", "-s", h.ips[b], "-j", "DROP")
+	h.run(h.t, "sudo", "ip", "netns", "exec", h.nss[a], "iptables", "-D", "OUTPUT", "-d", h.ips[b], "-j", "DROP")
+	h.run(h.t, "sudo", "ip", "netns", "exec", h.nss[b], "iptables", "-D", "INPUT", "-s", h.ips[a], "-j", "DROP")
+	h.run(h.t, "sudo", "ip", "netns", "exec", h.nss[b], "iptables", "-D", "OUTPUT", "-d", h.ips[a], "-j", "DROP")
+}
+
 // teardown is the SINGLE LIFO cleanup registered in newHarness. Order (Pitfall 3,
 // ADR-0018 kill-then-assert): kill every daemon PGID + reap, `ip netns del` each
 // namespace (auto-reaps its veth end + iptables rules), then delete the root-ns bridge
-// explicitly. Every failure is reported via t.Errorf — NEVER t.Fatalf, which is
-// disallowed in a cleanup func. The SC1 namespace-absence leak gate (assertNoLeak) is
-// wired in by Task 2 of this plan.
+// explicitly, then the SC1 namespace-absence leak gate. Every failure is reported via
+// t.Errorf — NEVER t.Fatalf, which is disallowed in a cleanup func.
 func (h *harness) teardown() {
 	for _, n := range h.nodes {
 		if n.killed {
@@ -411,6 +433,21 @@ func (h *harness) teardown() {
 	if err := h.runQuiet("sudo", "ip", "link", "del", h.bridge); err != nil &&
 		!strings.Contains(err.Error(), "Cannot find device") {
 		h.t.Errorf("teardown: ip link del %s: %v", h.bridge, err)
+	}
+	h.assertNoLeak()
+}
+
+// assertNoLeak is the SC1 positive-absence gate (the netns analog of processkill's
+// `ps -o pgid=` process-absence check): after teardown, NONE of this run's
+// `tr-<pid>-nX` namespaces may still appear in `ip netns list`. Data dirs live under
+// t.TempDir() (auto-removed) so no manual rm is needed. Every leak is reported via
+// t.Errorf — never t.Fatalf, which is disallowed in a cleanup func.
+func (h *harness) assertNoLeak() {
+	out, _ := exec.Command("ip", "netns", "list").Output()
+	for _, ns := range h.nss {
+		if strings.Contains(string(out), ns) {
+			h.t.Errorf("leak: netns %s still present after teardown", ns)
+		}
 	}
 }
 
