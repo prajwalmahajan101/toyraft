@@ -102,7 +102,7 @@ func normalizeOutput(raw any) (kvOutput, error) {
 		if val, ok := v["value"]; ok {
 			s, ok := val.(string)
 			if !ok {
-				return kvOutput{}, fmt.Errorf("Output map \"value\" is %T, want string", val)
+				return kvOutput{}, fmt.Errorf("output map \"value\" is %T, want string", val)
 			}
 			return kvOutput{Value: s, Found: true}, nil
 		}

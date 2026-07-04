@@ -248,7 +248,7 @@ func TestSegmentNameSorts(t *testing.T) {
 	if a != "0000000000000001.seg" {
 		t.Errorf("segmentName(1) = %q", a)
 	}
-	if !(a < b && b < c) {
+	if a >= b || b >= c {
 		t.Errorf("names not lexically ordered: %q %q %q", a, b, c)
 	}
 }

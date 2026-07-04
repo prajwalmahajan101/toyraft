@@ -107,10 +107,7 @@ func (f *Fake) NewTicker(d time.Duration) Ticker {
 func (f *Fake) Advance(d time.Duration) {
 	f.mu.Lock()
 	deadline := f.now.Add(d)
-	for {
-		if f.timers.Len() == 0 {
-			break
-		}
+	for f.timers.Len() > 0 {
 		top := f.timers[0]
 		if top.expiry.After(deadline) {
 			break

@@ -42,12 +42,10 @@ type memStorage struct {
 func (m *memStorage) Append(es []Entry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, e := range es {
-		// Contiguity: append at LastIndex()+1; truncate-then-append handled by
-		// TruncateSuffix. For the single-leader propose path entries arrive in
-		// strict order, so a plain append suffices.
-		m.entries = append(m.entries, e)
-	}
+	// Contiguity: append at LastIndex()+1; truncate-then-append handled by
+	// TruncateSuffix. For the single-leader propose path entries arrive in
+	// strict order, so a plain append suffices.
+	m.entries = append(m.entries, es...)
 	return nil
 }
 
