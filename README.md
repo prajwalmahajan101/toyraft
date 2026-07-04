@@ -1,8 +1,20 @@
 # ToyRaft
 
+[![CI](https://github.com/prajwalmahajan101/toyraft/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/prajwalmahajan101/toyraft/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/prajwalmahajan101/toyraft.svg)](https://pkg.go.dev/github.com/prajwalmahajan101/toyraft)
+[![Release](https://img.shields.io/github/v/release/prajwalmahajan101/toyraft?include_prereleases&sort=semver)](https://github.com/prajwalmahajan101/toyraft/releases)
+[![Go version](https://img.shields.io/github/go-mod/go-version/prajwalmahajan101/toyraft)](go.mod)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A minimal, from-scratch implementation of the [Raft consensus
 algorithm](https://raft.github.io/) in Go, with a small HTTP key/value demo on
 top.
+
+> **Status: `v1.0.0-rc.1`** — first release candidate; the 14-phase v1.0
+> milestone is complete (Raft core, durable storage, HTTP transport, reference
+> demo, seeded + netns chaos, and Porcupine linearizability all landed). Grab a
+> binary from [Releases](https://github.com/prajwalmahajan101/toyraft/releases),
+> or pin the library at a tag: `go get github.com/prajwalmahajan101/toyraft@v1.0.0-rc.1`.
 
 ## What it is
 
@@ -201,6 +213,34 @@ leader transparently.
 
 `GET /status` reports `role` as a **lowercase string** — `"follower"`,
 `"candidate"`, or `"leader"` — never a numeric code.
+
+### Observability
+
+**Logs.** The library takes an optional `*slog.Logger` via `Config.Logger`; the
+default is `slog.New(slog.DiscardHandler)` (silent). RPC sends log at `Debug`
+with structured fields (`from`, `to`, `term`, `type`, `lastLogIndex`); role
+transitions log at `Info`. `toyraftd -log-level debug` surfaces the RPC stream.
+
+**Metrics.** `toyraftd` publishes stdlib `expvar` counters at `/debug/vars`
+(alongside Go's runtime vars). Six `raft.*` series — published daemon-side so the
+single-mutex core carries no metrics plumbing (ADR-0021):
+
+| Series               | Kind    | Meaning                                                   |
+| -------------------- | ------- | --------------------------------------------------------- |
+| `raft.terms`         | counter | advances by the delta on each observed term increase      |
+| `raft.elections`     | counter | increments on each transition **into** the candidate role |
+| `raft.rpc.sent`      | counter | Raft RPC messages sent (bumped at the transport send seam) |
+| `raft.rpc.received`  | counter | Raft RPC messages received (transport register seam)      |
+| `raft.commit_lag`    | gauge   | `lastLogIndex − commitIndex` — entries awaiting commit     |
+| `raft.apply_lag`     | gauge   | `commitIndex − applyIndex` — committed entries awaiting apply |
+
+`commit_lag` / `apply_lag` are read-time gauges (computed on each scrape);
+the rest are monotonic counters.
+
+```sh
+curl -s localhost:9001/debug/vars \
+  | jq 'to_entries | map(select(.key | startswith("raft."))) | from_entries'
+```
 
 ### `toyraftctl`
 
