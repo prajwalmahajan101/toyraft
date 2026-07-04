@@ -589,6 +589,15 @@ func (c *Cluster) ProposeToLeader(op []byte) (raft.Index, bool) {
 //   - If id is not currently a leader (Propose returns *ErrNotLeader) or the
 //     append never lands within budget, return (0, false) — preserving the
 //     old "!ok -> caller Fatalf" semantics.
+//
+// wallClock is the sanctioned real-time source for the ProposeIntoForTest
+// poll bound. This helper waits on a REAL concurrent Propose goroutine, so it
+// needs true wall-clock — the harness FakeClock never self-advances and cannot
+// bound it. Routing through clock.NewReal() (which delegates to internal/clock/
+// real.go) honours the check-no-time-now ban instead of calling the stdlib
+// wall-clock entry point directly here. See the package "Wall-clock-leak ban".
+var wallClock clock.Clock = clock.NewReal()
+
 func (c *Cluster) ProposeIntoForTest(id raft.NodeID, op []byte) (raft.Index, bool) {
 	a := c.NodeByID(id)
 	if a == nil {
@@ -633,7 +642,7 @@ func (c *Cluster) ProposeIntoForTest(id raft.NodeID, op []byte) (raft.Index, boo
 		maxPolls    = 100000
 		pollTimeout = 2 * time.Second
 	)
-	deadline := time.Now().Add(pollTimeout)
+	deadline := wallClock.Now().Add(pollTimeout)
 	for range maxPolls {
 		runtime.Gosched() // let the proposal goroutine run past proposeLocked
 
@@ -652,7 +661,7 @@ func (c *Cluster) ProposeIntoForTest(id raft.NodeID, op []byte) (raft.Index, boo
 		if last > before {
 			return last, true
 		}
-		if time.Now().After(deadline) {
+		if wallClock.Now().After(deadline) {
 			return 0, false
 		}
 	}
