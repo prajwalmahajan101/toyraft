@@ -88,33 +88,30 @@ func TestNetnsPartition(t *testing.T) {
 	// nil = exclude nothing; every node is still reachable at this point.
 	baseline := h.maxCommitIndex(nil)
 
-	majority := len(h.nodes)/2 + 1 // = 2 for N=3: a majority the surviving side must still form.
+	majority := len(h.nodes)/2 + 1 // = 2 for N=3: the majority that must keep committing.
 
-	// 3. PARTITION two nodes so the third bridges quorum. Cut the single n0<->n1
-	// link: n2 still reaches BOTH n0 and n1, so {n0,n2} and {n1,n2} each stay
-	// connected and a majority containing n2 can still elect + commit (RESEARCH
-	// Open-Q4 N=3 shape). This is a REAL L3 DROP across distinct addresses — the
-	// retirement of D-1 (loopback masking).
-	h.partition(0, 1)
+	// 3. PARTITION: fully ISOLATE one FOLLOWER from the other two with real per-namespace
+	// iptables DROP across distinct L3 addresses (the retirement of D-1 — a real network
+	// partition loopback cannot exhibit). Isolating a SINGLE node (not cutting one link)
+	// is the correct 3-node shape: it leaves the remaining two a STABLE connected
+	// majority. A single-link cut instead leaves both split nodes reachable via the third
+	// and — with no PreVote / no check-quorum step-down in pkg/raft — flaps leadership as
+	// they duel for the third's vote, so a write mid-sequence blocks until timeout
+	// (DEBUG.md bug #2, 2026-07-04). The victim is a FOLLOWER so the current leader keeps
+	// its majority and never even needs to fail over during the partition.
+	victim := (h.indexOf(lead) + 1) % len(h.nodes) // a node that is NOT the current leader
+	h.isolate(victim)
 
-	// 4. Assert SURVIVING-MAJORITY recovery (positive oracle, ADR-0018), NOT "no panic".
-	// Deadlines are WIDENED from the process-kill suite's 1s/2s: a real L3 DROP makes
-	// TCP connect/read block until the transport's ~150ms SendTimeout, then retry, so
-	// recovery over a veth hop is slower than loopback (RESEARCH Pitfall 7). Use an 8s
-	// post-partition leader/commit deadline.
-	partDeadline := time.Now().Add(8 * time.Second)
-	survLead, ok := h.findLeader(partDeadline)
-	if !ok {
-		t.Fatalf("no leader among survivors within 8s after partitioning n0<->n1 (seed=%d)", seed)
-	}
-
-	// Write M new keys against the surviving leader, then poll the COMMIT SEAM until a
-	// MAJORITY of live nodes report commit_index >= baseline+M. This proves DURABLE
-	// replication on the surviving majority — a leader-served read-back alone would not.
+	// 4. Assert the SURVIVING MAJORITY keeps committing (positive oracle, ADR-0018), NOT
+	// "no panic". commitKV re-finds the leader per write and tolerates transient
+	// leadership; deadlines are WIDENED from the process-kill suite's 1s/2s because a real
+	// L3 DROP makes TCP connect/read block until the transport's ~150ms SendTimeout, then
+	// retry (RESEARCH Pitfall 7). Then poll the COMMIT SEAM until a MAJORITY reports
+	// commit_index >= baseline+M — DURABLE replication, not a leader-served read-back.
 	const m = 3
 	for i := 0; i < m; i++ {
-		if err := h.setKV(survLead.clientAddr, fmt.Sprintf("p%d", i), fmt.Sprintf("pv%d", i)); err != nil {
-			t.Fatalf("post-partition set p%d: %v (seed=%d)", i, err, seed)
+		if err := h.commitKV(fmt.Sprintf("p%d", i), fmt.Sprintf("pv%d", i), time.Now().Add(8*time.Second)); err != nil {
+			t.Fatalf("post-partition commit p%d: %v (seed=%d)", i, err, seed)
 		}
 	}
 	if !h.majorityCommitAtLeast(baseline+m, majority, time.Now().Add(8*time.Second)) {
@@ -122,25 +119,21 @@ func TestNetnsPartition(t *testing.T) {
 			m, baseline, seed)
 	}
 
-	// 5. HEAL the n0<->n1 link (delete the DROP rules) and assert FULL re-convergence:
-	// a leader is present and a further write commits on a majority now that all three
-	// nodes are reachable again — proving the cluster recovers full connectivity, not
-	// just limps on a partial quorum. Widened deadline again for the real L3 path.
-	h.heal(0, 1)
+	// 5. HEAL: rejoin the isolated node and assert FULL re-convergence — a further write
+	// commits on a majority now that all three nodes are reachable again, proving the
+	// cluster recovers full connectivity rather than limping on a partial quorum. The
+	// rejoining node may have inflated its term while isolated (no PreVote), forcing ONE
+	// re-election on rejoin; commitKV's re-find-and-retry absorbs it within the deadline.
+	h.rejoin(victim)
 
 	healBaseline := h.maxCommitIndex(nil)
-	healDeadline := time.Now().Add(8 * time.Second)
-	healLead, ok := h.findLeader(healDeadline)
-	if !ok {
-		t.Fatalf("no leader within 8s after healing n0<->n1 (seed=%d)", seed)
-	}
 	const healM = 2
 	for i := 0; i < healM; i++ {
-		if err := h.setKV(healLead.clientAddr, fmt.Sprintf("h%d", i), fmt.Sprintf("hv%d", i)); err != nil {
-			t.Fatalf("post-heal set h%d: %v (seed=%d)", i, err, seed)
+		if err := h.commitKV(fmt.Sprintf("h%d", i), fmt.Sprintf("hv%d", i), time.Now().Add(10*time.Second)); err != nil {
+			t.Fatalf("post-heal commit h%d: %v (seed=%d)", i, err, seed)
 		}
 	}
-	if !h.majorityCommitAtLeast(healBaseline+healM, majority, time.Now().Add(8*time.Second)) {
+	if !h.majorityCommitAtLeast(healBaseline+healM, majority, time.Now().Add(10*time.Second)) {
 		t.Fatalf("heal commit oracle: commit_index did not re-converge >= %d on a majority (baseline=%d, seed=%d)",
 			healM, healBaseline, seed)
 	}
