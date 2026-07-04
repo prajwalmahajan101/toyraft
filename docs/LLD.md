@@ -216,12 +216,13 @@ type Config struct {
 //   - Status is consistent within itself (no partial reads across fields)
 //     but may be stale by the time it is observed.
 type Status struct {
-    Role        Role
-    Term        Term
-    CommitIndex Index
-    ApplyIndex  Index
-    LeaderHint  NodeID            // best-known current leader, or empty
-    MatchIndex  map[NodeID]Index  // leader-only; nil on followers
+    Role         Role
+    Term         Term
+    CommitIndex  Index
+    ApplyIndex   Index
+    LastLogIndex Index             // last index present in the local log (>= CommitIndex)
+    LeaderHint   NodeID            // best-known current leader, or empty
+    MatchIndex   map[NodeID]Index  // leader-only; nil on followers
 }
 ```
 

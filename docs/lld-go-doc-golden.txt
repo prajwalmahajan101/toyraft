@@ -310,6 +310,12 @@ const (
 
 	MsgTick MessageType = 255 // internal-only; not wire-visible
 )
+func (t MessageType) String() string
+    String renders a MessageType as a human-readable label for the log `type`
+    field (observability, OBS-02) — a raw uint8 is opaque in a log line.
+    The mapping mirrors the frozen wire values; unknown values fall back to
+    MsgType(N) so a Phase-6 type widening surfaces legibly rather than silently.
+
 type Node interface {
 	// Start spawns the tick loop and brings the node online.
 	//
@@ -448,12 +454,13 @@ type StateMachine interface {
     breaking this interface (STOR-01 forward-compat). LLD §3.
 
 type Status struct {
-	Role        Role
-	Term        Term
-	CommitIndex Index
-	ApplyIndex  Index
-	LeaderHint  NodeID           // best-known current leader, or empty
-	MatchIndex  map[NodeID]Index // leader-only; nil on followers
+	Role         Role
+	Term         Term
+	CommitIndex  Index
+	ApplyIndex   Index
+	LastLogIndex Index            // last index present in the local log (>= CommitIndex)
+	LeaderHint   NodeID           // best-known current leader, or empty
+	MatchIndex   map[NodeID]Index // leader-only; nil on followers
 }
     Status is a point-in-time snapshot of a node's observable state. Returned by
     Node.Status() for /debug and operator tooling.
