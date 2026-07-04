@@ -426,6 +426,71 @@ func (h *harness) heal(a, b int) {
 	h.run(h.t, "sudo", "ip", "netns", "exec", h.nss[b], "iptables", "-D", "OUTPUT", "-d", h.ips[a], "-j", "DROP")
 }
 
+// isolate severs the node at index v from EVERY other node — a full MINORITY
+// partition — by reusing the per-link partition primitive against each peer. This is
+// the correct 3-node partition shape: a single-link cut (partition(a,b) alone) leaves
+// both "cut" nodes still reachable via the third, and with no PreVote / no check-quorum
+// step-down (pkg/raft) the two split nodes alternately win the third's vote → leadership
+// FLAPS and a mid-sequence client write blocks in Propose until it times out (DEBUG.md
+// bug #2, 2026-07-04). Isolating ONE node instead leaves the remaining two a STABLE
+// connected majority; the isolated node's election packets are all dropped so it never
+// disrupts the majority's leader while the partition holds.
+func (h *harness) isolate(v int) {
+	for i := range h.nodes {
+		if i != v {
+			h.partition(v, i)
+		}
+	}
+}
+
+// rejoin restores every link isolate(v) cut (its inverse), letting node v rejoin. With
+// no PreVote the rejoining node's inflated term can force ONE re-election on rejoin;
+// callers tolerate that via commitKV's re-find-and-retry.
+func (h *harness) rejoin(v int) {
+	for i := range h.nodes {
+		if i != v {
+			h.heal(v, i)
+		}
+	}
+}
+
+// indexOf returns the slice index of node n (nodes carry no self-index), or -1.
+func (h *harness) indexOf(n *node) int {
+	for i := range h.nodes {
+		if h.nodes[i] == n {
+			return i
+		}
+	}
+	return -1
+}
+
+// commitKV writes k=v against the CURRENT leader, tolerating transient leadership: it
+// (re-)finds the leader and PUTs; on any error — a stale leader that accepts then blocks
+// until the client timeout, or a redirect that races a step-down — it re-finds and
+// retries until the deadline. Returns nil once a leader accepts and commits the write.
+// This absorbs the single disruptive re-election a no-PreVote node can trigger on rejoin
+// (DEBUG.md bug #2); during the stable-majority partition phase the first attempt
+// succeeds immediately.
+func (h *harness) commitKV(k, v string, deadline time.Time) error {
+	var lastErr error
+	for time.Now().Before(deadline) {
+		lead, ok := h.findLeader(time.Now().Add(2 * time.Second))
+		if !ok {
+			lastErr = fmt.Errorf("no leader")
+			continue
+		}
+		if err := h.setKV(lead.clientAddr, k, v); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("deadline exceeded before any leader accepted the write")
+	}
+	return fmt.Errorf("commitKV %s: %w", k, lastErr)
+}
+
 // teardown is the SINGLE LIFO cleanup registered in newHarness. Order (Pitfall 3,
 // ADR-0018 kill-then-assert): kill every daemon PGID + reap, `ip netns del` each
 // namespace (auto-reaps its veth end + iptables rules), then delete the root-ns bridge
