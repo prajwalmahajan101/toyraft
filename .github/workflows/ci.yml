@@ -70,12 +70,14 @@ jobs:
         run: go vet ./...
 
       - name: go test -race
-        # Excludes ./test/chaos/... — that tree is run by the dedicated
-        # chaos step below so it isn't swept twice per matrix cell (the
-        # process-kill harness boots 5 real daemons under -race, which is
-        # slow on macOS runners). Making the chaos step the single source
+        # Excludes ./test/chaos/... AND ./test/linearizability/... — those
+        # trees are run by their dedicated steps below so they aren't swept
+        # twice per matrix cell (the process-kill harness boots 5 real
+        # daemons under -race, which is slow on macOS runners; the
+        # linearizability step is the single home for the no-retry
+        # correctness comment). Making each dedicated step the single source
         # also gives clean failure attribution.
-        run: go test -race -timeout 5m $(go list ./... | grep -v '/test/chaos/')
+        run: go test -race -timeout 5m $(go list ./... | grep -Ev '/test/(chaos|linearizability)/')
 
       - name: Chaos suite (seeded inproc matrix + process-kill — CHAOS-07/SC5)
         # Phase 11 SC5: a chaos failure is TERMINAL and fails the build on
@@ -89,6 +91,17 @@ jobs:
         # `test` job so no new required-status-check name is introduced
         # (ADR-0002 + branch protection unchanged).
         run: go test -race -timeout 10m ./test/chaos/...
+
+      - name: Linearizability suite (Porcupine KV-register + Figure 7/8 — LIN-04/SC5)
+        # Phase 12 SC5: a linearizability failure is TERMINAL and fails the
+        # build on the first occurrence. Deliberately plain — no conditional
+        # guard, no failure-tolerating modifier, no re-run loop: masking a
+        # violation would defeat the correctness gate. Scripted concurrent
+        # histories are byte-deterministic and fast, so this runs on both
+        # matrix OSes with no flakiness budget. The step lives inside the
+        # existing `test` job so no new required-status-check name is
+        # introduced (ADR-0002 + branch protection unchanged).
+        run: go test -race -timeout 5m ./test/linearizability/...
 
       - name: Test (raftdebug build tag — invariant negative tests)
         # Per ADR-0004 + .planning/phases/02-foundations/02-RESEARCH.md §6.3 /
