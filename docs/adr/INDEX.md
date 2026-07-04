@@ -35,13 +35,5 @@ one-line summary. Order is by number.
 - [ADR-0018](0018-chaos-suite-pgid-kill-and-oracles.md) — Chaos suite: PGID group kill, positive oracles, and the determinism boundary.
 - [ADR-0019](0019-linearizability-porcupine-model-and-scripted-histories.md) — Linearizability verification: Porcupine KV-register model and scripted histories.
 - [ADR-0020](0020-netns-iptables-chaos-and-dedicated-ci-job.md) — netns/iptables partition chaos and a dedicated CI job.
-
-## Planned this phase (Phase 14)
-
-The following ADRs are Phase-14 deliverables authored by sibling plans and may
-not yet be on disk when this index was first written; **Plan 14-05 (phase close)
-reconciles this index against `ls docs/adr/*.md`** so any drift is caught and
-fixed at phase close:
-
-- **ADR-0021** — Observability: expvar `raft.*` counters + un-gated `/status` + structured RPC/role logs (Plan 14-01).
-- **ADR-0022** — GoReleaser release build: `toyraftd` + `toyraftctl` across `{linux, macOS} × {amd64, arm64}`; library ships via plain semver tags (Plan 14-03).
+- [ADR-0021](0021-observability-published-daemon-side.md) — Observability published daemon-side: expvar `raft.*` counters + un-gated `/status` + structured RPC/role logs.
+- [ADR-0022](0022-goreleaser-dual-binary-release.md) — GoReleaser release build shipping `toyraftd` + `toyraftctl` across `{linux, macOS} × {amd64, arm64}`; library ships via plain semver tags.
