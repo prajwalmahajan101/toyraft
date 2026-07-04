@@ -52,6 +52,13 @@ type faultVFS struct {
 	// (unsynced bytes are NOT promoted). This models "the process was killed
 	// after Write returned but before the fsync landed" for the SC3 test.
 	suppressNextSync bool
+
+	// crashBeforeNextRename, when set, makes the NEXT Rename crash the store
+	// (drop unsynced + un-durable state) and return an error INSTEAD of
+	// performing the swap — modelling a process death at the rename(2) syscall,
+	// after the tmp file was written+fsynced but before the atomic swap landed
+	// (the SC4 window). One-shot.
+	crashBeforeNextRename bool
 }
 
 // faultFileState is the durable/unsynced page-cache state for one path, shared
@@ -129,6 +136,11 @@ func (fv *faultVFS) OpenAppend(name string) (vfile, error) {
 func (fv *faultVFS) Rename(oldpath, newpath string) error {
 	fv.mu.Lock()
 	defer fv.mu.Unlock()
+	if fv.crashBeforeNextRename {
+		fv.crashBeforeNextRename = false
+		fv.crashLocked()
+		return os.ErrClosed // the rename(2) never completed (process died)
+	}
 	if !fv.exists(oldpath) {
 		return os.ErrNotExist
 	}
@@ -207,6 +219,12 @@ func (fv *faultVFS) ReadDir(dir string) ([]string, error) {
 func (fv *faultVFS) Crash() {
 	fv.mu.Lock()
 	defer fv.mu.Unlock()
+	fv.crashLocked()
+}
+
+// crashLocked is the body of Crash; callable from Rename which already holds
+// fv.mu (the SC4 crash-at-rename path).
+func (fv *faultVFS) crashLocked() {
 	fv.suppressNextSync = false
 	// Drop the un-fsynced metadata delta.
 	fv.pendingNames = make(map[string]bool)
