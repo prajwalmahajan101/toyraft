@@ -2,7 +2,44 @@
 
 **Status:** Accepted
 **Date:** 2026-06-18
-**Scope:** `.golangci.yml`
+**Scope:** `.golangci.yml`, `.github/workflows/ci.yml` (lint job)
+
+## Amended 2026-07-04 (Phase 14 / QUAL-01)
+
+The v1→v2 migration this ADR always described (see Decision, written for the
+v2 schema) is now **executed in the repository**, not just documented:
+
+- **Config schema migrated v1 → v2.** `.golangci.yml` was rewritten via
+  `golangci-lint migrate` (binary 2.12.2) and now declares `version: "2"`.
+  The schema changes the tool applied: `linters.disable-all: true` →
+  `linters.default: none`; `linters-settings` → `linters.settings`;
+  `issues.exclude-rules` → `linters.exclusions.rules`; and a `formatters:`
+  block was split out. The conservative seven-linter set (errcheck, govet,
+  ineffassign, staticcheck, unused, misspell, revive) is **preserved
+  unchanged** — gosec is still excluded (see Decision). `run.timeout` was
+  dropped because v2 disables the timeout by default.
+- **v2's expanded `staticcheck` surfaced four simplification findings**
+  (the folded-in gosimple/stylecheck S/QF/ST families): a lift-into-loop
+  condition, an append-slice, a De Morgan simplification, and a lowercase
+  error-string fix. All four were fixed in the same change so
+  `golangci-lint run ./...` exits **0 clean** on the v2 binary (2.12.2). No
+  linter was blanket-disabled and no scoped exclusion was added for them.
+- **CI action pin bumped `v1.62.0` → `v2.12.2`** in `ci.yml`'s `lint` job
+  (`golangci/golangci-lint-action@v6`), pinned to the exact release the
+  clean run was verified against. `install-mode: goinstall` is retained
+  (required for Go 1.26 source parsing). The v2 binary cannot parse a v1
+  config and vice-versa, so the config schema and the action pin were bumped
+  **in lockstep**.
+- **The required-check NAME `lint` is unchanged.** Only the tool version and
+  config *schema* moved; the job's `name:` field is still `lint`, so
+  [ADR-0002]'s frozen eight-name required-check set (and the branch-protection
+  contexts derived from it) is **unaffected**.
+- **Trilogy stance:** toyraft **leads** the trilogy to golangci-lint v2;
+  siblings toymq and toykv remain on v1 for now (deliberate, per Phase 14
+  CONTEXT — a future trilogy-wide unification ADR may supersede this).
+
+The Decision below (originally written for the v2 schema) now matches the
+on-disk config exactly.
 
 ## Context
 
