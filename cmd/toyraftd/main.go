@@ -22,7 +22,7 @@ package main
 import (
 	"context"
 	"errors"
-	_ "expvar" // side-effect: registers /debug/vars on DefaultServeMux
+	"expvar" // registers /debug/vars on DefaultServeMux; also used to publish raft.* counters
 	"flag"
 	"fmt"
 	"log/slog"
@@ -47,6 +47,16 @@ import (
 // port is its peer port + this offset. Demo peer 7001 -> client 9001.
 const clientPortOffset = 2000
 
+// Build-stamp vars, injected at release time via `-ldflags "-X main.version=..."`
+// (goreleaser). They default to "dev"/"none"/"unknown" for a plain `go build`.
+// The -version flag prints them and exits; they are also folded into the
+// "toyraftd up" log line for run-time provenance.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "toyraftd:", err)
@@ -65,6 +75,7 @@ func run() error {
 		dataDir  = flag.String("data-dir", "", "directory for the durable append-only log + hard state")
 		seed     = flag.Int64("seed", 0, "deterministic RNG seed for election-timeout draws (0 = clock-derived entropy)")
 		logLevel = flag.String("log-level", "info", "log verbosity: debug|info|warn|error")
+		showVer  = flag.Bool("version", false, "print version/commit/build-date and exit")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(),
@@ -79,6 +90,11 @@ func run() error {
 				"their -peers host:port via the +%d offset.\n", clientPortOffset, clientPortOffset)
 	}
 	flag.Parse()
+
+	if *showVer {
+		fmt.Printf("toyraftd %s (commit %s, built %s)\n", version, commit, date)
+		return nil
+	}
 
 	if *id == "" || *peers == "" || *listen == "" || *dataDir == "" {
 		flag.Usage()
@@ -140,12 +156,25 @@ func run() error {
 		return fmt.Errorf("build transport: %w", err)
 	}
 
+	// Observability counters (OBS-04 / SC2). Published DAEMON-SIDE with stdlib
+	// expvar ONLY — the single-mutex raft core (ADR-0004) stays untouched. The
+	// six byte-exact names are the /debug/vars contract (see observability_test):
+	//   raft.terms, raft.elections, raft.rpc.sent, raft.rpc.received,
+	//   raft.commit_lag, raft.apply_lag.
+	// terms/elections are polled from node.Status() below; rpc.sent/received are
+	// bumped at the asyncTransport Send/Register seams; commit_lag/apply_lag are
+	// read-time gauges computed from a fresh Status() snapshot on each scrape.
+	raftTerms := expvar.NewInt("raft.terms")
+	raftElections := expvar.NewInt("raft.elections")
+	rpcSent := expvar.NewInt("raft.rpc.sent")
+	rpcReceived := expvar.NewInt("raft.rpc.received")
+
 	// Wrap the HTTP transport so the tick loop's Send never blocks on a slow or
 	// frozen peer (see asynctransport.go): synchronous Sends to a kill -STOP'd
 	// node were desynchronising heartbeats enough to churn elections at N=5.
 	// node.Stop() closes this wrapper via the raft.Transport contract, which
 	// stops the drain goroutines and then closes the inner HTTP transport.
-	atr := newAsyncTransport(tr)
+	atr := newAsyncTransport(tr, rpcSent, rpcReceived)
 
 	node, err := raft.New(raft.Config{
 		NodeID:       selfID,
@@ -160,6 +189,19 @@ func run() error {
 		_ = atr.Close() // release the just-started listener before bailing
 		return fmt.Errorf("build node: %w", err)
 	}
+
+	// commit_lag / apply_lag are READ-time gauges: each scrape of /debug/vars
+	// computes them from a fresh Status() snapshot (LastLogIndex-CommitIndex and
+	// CommitIndex-ApplyIndex). This keeps them exact at read time without any
+	// core hook. expvar.Func's result is JSON-encoded, so return int64.
+	expvar.Publish("raft.commit_lag", expvar.Func(func() any {
+		s := node.Status()
+		return int64(s.LastLogIndex - s.CommitIndex)
+	}))
+	expvar.Publish("raft.apply_lag", expvar.Func(func() any {
+		s := node.Status()
+		return int64(s.CommitIndex - s.ApplyIndex)
+	}))
 
 	// DECISION (RESEARCH Open-Q 2): the client API is served on
 	// http.DefaultServeMux so the blank imports of net/http/pprof and expvar
@@ -189,9 +231,20 @@ func run() error {
 		return fmt.Errorf("start node: %w", err)
 	}
 
+	// Poll ticker sourcing raft.terms + raft.elections (OBS-04). The core stays
+	// untouched (ADR-0004), so these are DERIVED by polling Status() every 200ms:
+	// each observed Term increase advances raft.terms by the delta, and each
+	// observed transition INTO the candidate role bumps raft.elections. This is a
+	// deliberate approximation — a fast term jump between two polls still counts
+	// the full delta for terms, but a candidacy that resolves inside one poll
+	// interval may be missed for elections — which is "close enough" for an
+	// educational demo and buys a zero-core-coupling design. Stopped via pollDone.
+	pollDone := make(chan struct{})
+	go pollDerivedCounters(node, raftTerms, raftElections, pollDone)
+
 	logger.Info("toyraftd up",
 		"id", *id, "peer_addr", peerAddrs[selfID], "client_addr", *listen,
-		"peers", len(allIDs))
+		"peers", len(allIDs), "version", version, "commit", commit, "date", date)
 
 	// Block until SIGINT/SIGTERM, then shut the CLIENT server down (Shutdown)
 	// BEFORE node.Stop() — node.Stop closes the transport internally, so we must
@@ -211,6 +264,7 @@ func run() error {
 
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	close(pollDone) // stop the derived-counter poll goroutine before node.Stop
 	shutErr := kvSrv.Shutdown(shutCtx)
 	stopErr := node.Stop() // closes the transport internally (no double-close)
 
@@ -308,4 +362,38 @@ func newLogger(level string) (*slog.Logger, error) {
 		return nil, fmt.Errorf("unknown -log-level %q (want debug|info|warn|error)", level)
 	}
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})), nil
+}
+
+// pollDerivedCounters DERIVES raft.terms and raft.elections from periodic
+// Status() snapshots — the core is never modified (ADR-0004). It advances terms
+// by each observed Term delta and bumps elections on each observed transition
+// INTO the Candidate role, tracking prevTerm/prevRole across ticks. It exits
+// when done is closed (daemon shutdown). Poll-based approximation per CONTEXT.
+func pollDerivedCounters(node raft.Node, terms, elections *expvar.Int, done <-chan struct{}) {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	var (
+		prevTerm raft.Term
+		prevRole raft.Role
+		seeded   bool
+	)
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			s := node.Status()
+			if !seeded {
+				prevTerm, prevRole, seeded = s.Term, s.Role, true
+				continue
+			}
+			if s.Term > prevTerm {
+				terms.Add(int64(s.Term - prevTerm))
+			}
+			if s.Role == raft.Candidate && prevRole != raft.Candidate {
+				elections.Add(1)
+			}
+			prevTerm, prevRole = s.Term, s.Role
+		}
+	}
 }
