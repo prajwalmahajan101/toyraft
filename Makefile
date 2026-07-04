@@ -6,7 +6,7 @@
 # target guards this BEFORE launching anything.
 N ?= 3
 
-.PHONY: hooks lld-drift lld-drift-update check-no-time-now verify build-demo demo
+.PHONY: hooks lld-drift lld-drift-update check-no-time-now verify build-demo demo release-check release-snapshot
 
 # build-demo compiles both reference binaries into bin/ (gitignored). The demo
 # target depends on it so `make demo` is one command from a clean tree.
@@ -25,6 +25,17 @@ hooks:
 	@chmod +x .githooks/*
 	git config core.hooksPath .githooks
 	@echo "Hooks installed (pre-commit + commit-msg)"
+
+# release-check validates .goreleaser.yml against the v2 schema (SC8 config
+# gate — fails on any deprecated key such as the removed archives.replacements).
+release-check:
+	goreleaser check
+
+# release-snapshot builds the release artifacts locally WITHOUT publishing:
+# both binaries (toyraftd + toyraftctl) for {linux,macOS} x {amd64,arm64} land
+# under dist/. This is the SC8/QUAL-07 verification path — no git tag required.
+release-snapshot:
+	goreleaser release --snapshot --clean
 
 lld-drift:
 	@bash scripts/check-lld-drift.sh
