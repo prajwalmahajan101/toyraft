@@ -193,6 +193,54 @@ func (h *Hub) dispatch() {
 	}
 }
 
+// DrainDueSync delivers every message whose deliverAt <= clk.Now() onto its
+// receiver's inbound channel, SYNCHRONOUSLY on the calling goroutine, and
+// returns once the heap holds no more due messages. It is the SyncDelivery
+// counterpart to the dispatch loop: same drain (drainDueLocked) + same reorder
+// (orderLocked), but with NO goroutine handoff and NO wall-clock wait — so the
+// set of messages a given logical instant delivers is a pure function of
+// (seed, FakeClock state, chaos seed). This is what makes a chaos run
+// byte-deterministic under FakeClock (ADR-0017); the async dispatcher's
+// 2ms-sleep-quiesce window made "which drain observes a delivery" depend on
+// wall-clock, diverging the committed set run-to-run.
+//
+// Contract: valid only on a Hub built with HubConfig.SyncDelivery (no competing
+// dispatcher goroutine drains the same heap). Delivery is a blocking channel
+// send guarded by h.ctx.Done so a Close during a full-buffer send unblocks;
+// callers (raftest.Cluster) drain inbound between passes so the bounded buffer
+// does not fill in practice.
+func (h *Hub) DrainDueSync() {
+	for {
+		h.mu.Lock()
+		due := h.drainDueLocked(h.clk.Now())
+		if len(due) == 0 {
+			h.mu.Unlock()
+			return
+		}
+		ordered := h.orderLocked(due)
+		// Snapshot receivers under h.mu so the sends below run lock-free
+		// (mirrors the async dispatcher's snapshot).
+		recvs := make([]*nodeState, len(ordered))
+		for i, p := range ordered {
+			recvs[i] = h.nodes[p.to]
+		}
+		h.mu.Unlock()
+
+		for i, p := range ordered {
+			ns := recvs[i]
+			if ns == nil {
+				// Receiver never Connected — silently drop (mirrors dispatch).
+				continue
+			}
+			select {
+			case ns.inbound <- p.msg:
+			case <-h.ctx.Done():
+				return
+			}
+		}
+	}
+}
+
 // orderLocked applies the reorder knob to a batch drained at the same
 // logical instant. With reorder disabled, the batch is returned as-is
 // (already in (deliverAt, seq) total order from drainDueLocked).

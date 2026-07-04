@@ -213,6 +213,20 @@ func (a *RaftNodeAdapter) commitIndex() raft.Index {
 	return a.node.Status().CommitIndex
 }
 
+// CommitIndex returns node id's reported commit index (Status().CommitIndex).
+// Exposed so chaos suites can assert COMMITTED progress (not leader-local
+// appends — cf. ProposeToLeader, which returns on append, not commit). This
+// is a one-line wrapper over the existing commitIndex() seam and adds NO new
+// exported type/field beyond this single method on Cluster; behaviour of every
+// existing path is unchanged. Returns 0 if id is unknown.
+func (c *Cluster) CommitIndex(id raft.NodeID) raft.Index {
+	a := c.NodeByID(id)
+	if a == nil {
+		return 0
+	}
+	return a.commitIndex()
+}
+
 // logFromStorage reads the node's replicated log from its OrderingStorage
 // (R-4 LOCKED decision): the Storage mirror IS the durable log written in
 // lockstep with the in-memory log (ADR-0011), so this is byte-equivalent to
@@ -280,7 +294,7 @@ func NewCluster(t testing.TB, n int, seed int64) *Cluster {
 	}
 
 	clk := clock.NewFake()
-	hub, err := inproc.NewHub(inproc.HubConfig{Clock: clk, Seed: seed})
+	hub, err := inproc.NewHub(inproc.HubConfig{Clock: clk, Seed: seed, SyncDelivery: true})
 	if err != nil {
 		t.Fatalf("raftest: NewHub: %v", err)
 	}
@@ -431,13 +445,17 @@ func (c *Cluster) drainInbound(a *RaftNodeAdapter) {
 	}
 }
 
-// deliveryQuiesce gives the single async Hub dispatcher goroutine a brief
-// wall-clock window to land scheduled deliveries onto receiver inbound
-// channels between the two driver passes. The trace itself is determined by
-// (seed, FakeClock state, Hub chaos seed); this sleep only ensures the
-// dispatcher has run before pass 2 inspects the inbound channels — the same
-// role the Phase-5 harness's quiesce() played (sized identically at 2ms).
-func (c *Cluster) deliveryQuiesce() { time.Sleep(2 * time.Millisecond) }
+// deliveryQuiesce SYNCHRONOUSLY lands every message the Hub has scheduled for
+// delivery at or before the current logical instant onto receiver inbound
+// channels, between the two driver passes. The Hub is built in SyncDelivery
+// mode (NewCluster), so this is a direct in-line drain (Hub.DrainDueSync) with
+// NO background dispatcher goroutine and NO wall-clock sleep: the set of
+// messages pass 2 observes is a pure function of (seed, FakeClock state, chaos
+// seed). This is what makes a chaos run byte-deterministic — the prior 2ms
+// time.Sleep waited on an async dispatcher whose progress within that
+// wall-clock window decided which Tick observed a delivery, diverging the
+// committed set run-to-run under chaos (ADR-0017).
+func (c *Cluster) deliveryQuiesce() { c.Hub.DrainDueSync() }
 
 // AssertAtMostOneLeaderPerTerm is the SC6 / ELEC-10 invariant. Snapshots
 // each node's (Role, Term); groups Leaders by Term; fails via t.Fatalf if

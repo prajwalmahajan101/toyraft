@@ -27,6 +27,16 @@ type HubConfig struct {
 	// CloseTimeout caps how long Close waits for the dispatcher to exit
 	// before declaring leak. Default 100ms per SC4.
 	CloseTimeout time.Duration
+
+	// SyncDelivery selects the SYNCHRONOUS delivery model: when true, NewHub
+	// does NOT start the background dispatcher goroutine, and the caller must
+	// pump due messages onto receiver inbound channels itself via DrainDueSync.
+	// This gives a byte-deterministic delivery schedule under FakeClock with no
+	// goroutine/wall-clock handoff — the seam internal/raftest.Cluster.Tick uses
+	// so `same seed -> byte-identical trace` holds under chaos (ADR-0017). The
+	// default (false) keeps the async single-dispatcher model used by every
+	// other caller (hub_test / chaos_test / transporttest conformance).
+	SyncDelivery bool
 }
 
 const (
