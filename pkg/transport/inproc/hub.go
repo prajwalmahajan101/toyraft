@@ -120,6 +120,16 @@ func (h *Hub) Connect(id raft.NodeID) *Endpoint {
 	return &Endpoint{hub: h, id: id, in: ns.inbound}
 }
 
+// Transport returns a raft.Transport bound to id, reconciling the inproc Hub to
+// the frozen LLD §3 Transport PUSH interface (ADR-0014, SC6/TRAN-06). It is the
+// ADDITIVE path: it wraps the *Endpoint from Connect (the load-bearing pull API
+// that the chaos/hub/cluster suites depend on, left untouched) in a hubTransport
+// whose Register spawns an inbound pump and whose Close stops ONLY this node's
+// delivery (pump-stop; the Hub and other nodes keep running).
+func (h *Hub) Transport(id raft.NodeID) raft.Transport {
+	return newHubTransport(h.Connect(id))
+}
+
 // Close cancels the Hub's context, joins the dispatcher within
 // CloseTimeout, and is safe to call from multiple goroutines (sync.Once
 // guarded). Close always returns nil; a dispatcher-join overrun is a

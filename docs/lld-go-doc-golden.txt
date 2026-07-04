@@ -820,6 +820,14 @@ func (h *Hub) Reorder(enabled bool, queueDepth int)
     approach FIFO (RESEARCH Pitfall 6 — queueDepth of 1 degenerates to FIFO by
     construction).
 
+func (h *Hub) Transport(id raft.NodeID) raft.Transport
+    Transport returns a raft.Transport bound to id, reconciling the inproc Hub
+    to the frozen LLD §3 Transport PUSH interface (ADR-0014, SC6/TRAN-06). It
+    is the ADDITIVE path: it wraps the *Endpoint from Connect (the load-bearing
+    pull API that the chaos/hub/cluster suites depend on, left untouched) in a
+    hubTransport whose Register spawns an inbound pump and whose Close stops
+    ONLY this node's delivery (pump-stop; the Hub and other nodes keep running).
+
 type HubConfig struct {
 	// Clock drives the dispatcher's logical time. Required. Tests pass a
 	// *clock.Fake here so message delivery is reproducible from a seed.

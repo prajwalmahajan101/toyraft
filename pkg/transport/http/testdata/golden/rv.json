@@ -1,0 +1,8 @@
+{
+  "type": 0,
+  "term": 7,
+  "from": "node-1",
+  "to":   "node-2",
+  "last_log_index": 42,
+  "last_log_term":  6
+}

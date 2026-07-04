@@ -1,0 +1,13 @@
+{
+  "type": 2,
+  "term": 7,
+  "from": "node-1",
+  "to":   "node-2",
+  "prev_log_index": 41,
+  "prev_log_term":  6,
+  "entries": [
+    { "term": 7, "index": 42, "data": "UFVUIGZvbyBiYXI=" },
+    { "term": 7, "index": 43, "data": "REVMIGZvbw==" }
+  ],
+  "leader_commit": 40
+}
