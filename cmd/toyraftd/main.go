@@ -114,15 +114,24 @@ func run() error {
 	sm := kvsm.New()
 
 	tr, err := httptransport.New(httptransport.Config{
-		NodeID:      selfID,
-		ListenAddr:  peerAddrs[selfID], // self's PEER addr from -peers, NOT -listen
-		PeerURLs:    peerURLs,          // EXCLUDES self
-		Clock:       clock.NewReal(),
-		SendTimeout: 1 * time.Second,
+		NodeID:     selfID,
+		ListenAddr: peerAddrs[selfID], // self's PEER addr from -peers, NOT -listen
+		PeerURLs:   peerURLs,          // EXCLUDES self
+		Clock:      clock.NewReal(),
+		// The tick loop (pkg/raft driver) calls Transport.Send SYNCHRONOUSLY per
+		// outbound message, so SendTimeout bounds how long ONE dead/frozen peer
+		// can stall a whole tick — and thus a campaigner's election progress. A
+		// kill -STOP'd leader keeps its TCP port bound (the kernel completes the
+		// handshake) but never answers, so the HTTP client blocks on read up to
+		// SendTimeout. Keeping it SHORT (well under a couple of heartbeats) and
+		// doing a SINGLE attempt (the frozen contract makes the NEXT heartbeat the
+		// real retry, not this loop) keeps re-election responsive during the demo
+		// partition — the smoke test's SC5 gate depends on it.
+		SendTimeout: 150 * time.Millisecond,
 		Backoff: httptransport.BackoffConfig{
-			Base:        50 * time.Millisecond,
+			Base:        20 * time.Millisecond,
 			Factor:      2,
-			MaxAttempts: 3,
+			MaxAttempts: 1,
 		},
 		MaxBodyBytes:    0, // server default (8 MiB)
 		ShutdownTimeout: 5 * time.Second,
@@ -131,17 +140,24 @@ func run() error {
 		return fmt.Errorf("build transport: %w", err)
 	}
 
+	// Wrap the HTTP transport so the tick loop's Send never blocks on a slow or
+	// frozen peer (see asynctransport.go): synchronous Sends to a kill -STOP'd
+	// node were desynchronising heartbeats enough to churn elections at N=5.
+	// node.Stop() closes this wrapper via the raft.Transport contract, which
+	// stops the drain goroutines and then closes the inner HTTP transport.
+	atr := newAsyncTransport(tr)
+
 	node, err := raft.New(raft.Config{
 		NodeID:       selfID,
 		Peers:        allIDs, // INCLUDES self; odd N enforced by Validate
 		Storage:      store,
-		Transport:    tr,
+		Transport:    atr,
 		StateMachine: sm,
 		Seed:         *seed,
 		Logger:       logger,
 	})
 	if err != nil {
-		_ = tr.Close() // release the just-started listener before bailing
+		_ = atr.Close() // release the just-started listener before bailing
 		return fmt.Errorf("build node: %w", err)
 	}
 
