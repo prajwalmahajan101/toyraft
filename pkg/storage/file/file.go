@@ -237,11 +237,211 @@ func (s *Storage) SaveHardState(hs raft.HardState) error { return nil }
 // LoadHardState is a temporary no-op stub; the real impl lands in 08-04.
 func (s *Storage) LoadHardState() (raft.HardState, error) { return raft.HardState{}, nil }
 
-// Append is a temporary stub replaced by Task 2 of this plan.
-func (s *Storage) Append(entries []raft.Entry) error { return nil }
+// errNonContiguous is wrapped by Append when entries do not start at
+// LastIndex()+1 or are not strictly increasing by 1 — matching the memory
+// impl's contract (08-RESEARCH §1). Same-package reference (Append) keeps
+// the `unused` linter quiet.
+var errNonContiguous = errors.New("file storage: non-contiguous append")
 
-// TruncateSuffix is a temporary stub replaced by Task 2 of this plan.
-func (s *Storage) TruncateSuffix(from raft.Index) error { return nil }
+// lastIndexLocked returns the largest logical index in the log, or 0 if
+// empty. Caller holds s.mu.
+func (s *Storage) lastIndexLocked() raft.Index {
+	if len(s.idx) == 0 {
+		return 0
+	}
+	return s.idx[len(s.idx)-1].index
+}
+
+// Append persists entries contiguously and fsyncs the active segment before
+// returning (STOR-04/REPL-09/P0-4). Entries MUST start at LastIndex()+1 and
+// increase by 1; otherwise the call returns an error wrapping errNonContiguous
+// and leaves the on-disk state unchanged (atomic per call — the whole batch
+// is validated BEFORE any record is written).
+//
+// Rollover: when the active segment would exceed maxEntriesPerSegment, a new
+// segment (segmentName of the next index) is created, its header written, and
+// — CRITICAL (SC5/Per-3) — the parent directory is fsynced so the new
+// segment's directory entry is durable BEFORE this Append returns. Only after
+// the active-segment Sync succeeds is the in-RAM index extended, so memory
+// never claims a durability the disk lacks (if Sync fails the index is left
+// untouched).
+func (s *Storage) Append(entries []raft.Entry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(entries) == 0 {
+		return nil
+	}
+
+	// Validate the ENTIRE batch before writing anything (atomic per call).
+	expected := s.lastIndexLocked() + 1
+	if entries[0].Index != expected {
+		return fmt.Errorf("file storage: append at index %d, got %d: %w", expected, entries[0].Index, errNonContiguous)
+	}
+	for i := 0; i+1 < len(entries); i++ {
+		if entries[i+1].Index != entries[i].Index+1 {
+			return fmt.Errorf("file storage: append at index %d, got %d: %w", entries[i].Index+1, entries[i+1].Index, errNonContiguous)
+		}
+	}
+
+	// Write every record, rolling to a new segment when the counter would
+	// exceed the threshold. Stage the new index entries and only commit them
+	// to s.idx after the durability Sync below.
+	staged := make([]idxEntry, 0, len(entries))
+	for _, e := range entries {
+		if s.activeFile == nil || s.activeCount >= s.maxEntriesPerSegment {
+			if err := s.rolloverLocked(e.Index); err != nil {
+				return err
+			}
+		}
+		off, err := s.writeRecordLocked(e)
+		if err != nil {
+			return err
+		}
+		staged = append(staged, idxEntry{
+			index:   e.Index,
+			term:    e.Term,
+			segment: s.active,
+			offset:  off,
+			length:  payloadFixedLen + len(e.Data),
+		})
+		s.activeCount++
+	}
+
+	// fsync the active segment BEFORE returning (durability precedes success).
+	if err := s.activeFile.Sync(); err != nil {
+		return fmt.Errorf("file storage: sync on append: %w", err)
+	}
+	s.idx = append(s.idx, staged...)
+	return nil
+}
+
+// rolloverLocked closes the current active segment (if any), creates a new
+// segment named for firstIndex, writes its header, and fsyncs the parent
+// directory so the new segment's directory entry is durable BEFORE the caller
+// (Append) returns (SC5/Per-3). Caller holds s.mu.
+func (s *Storage) rolloverLocked(firstIndex raft.Index) error {
+	if s.activeFile != nil {
+		if err := errors.Join(s.activeFile.Sync(), s.activeFile.Close()); err != nil {
+			return fmt.Errorf("file storage: close segment on rollover: %w", err)
+		}
+		s.activeFile = nil
+	}
+	name := segmentName(firstIndex)
+	f, err := s.fs.Create(s.path(name))
+	if err != nil {
+		return fmt.Errorf("file storage: create segment %q: %w", name, err)
+	}
+	if err := writeSegHeader(f); err != nil {
+		return fmt.Errorf("file storage: write segment header %q: %w", name, errors.Join(err, f.Close()))
+	}
+	// Per-3: the new segment's directory entry must be durable before the
+	// Append that triggered this rollover returns.
+	if err := s.fs.SyncDir(s.dir); err != nil {
+		return fmt.Errorf("file storage: syncdir after create %q: %w", name, errors.Join(err, f.Close()))
+	}
+	s.active = name
+	s.activeFile = f
+	s.activeCount = 0
+	return nil
+}
+
+// writeRecordLocked encodes e into the active segment and returns the byte
+// offset of the record's PAYLOAD (used by the in-RAM index for later reads).
+// Caller holds s.mu and guarantees s.activeFile is non-nil.
+func (s *Storage) writeRecordLocked(e raft.Entry) (int64, error) {
+	size, err := s.activeFile.Size()
+	if err != nil {
+		return 0, fmt.Errorf("file storage: size before write: %w", err)
+	}
+	// The payload starts recHeaderLen bytes after the record start (the
+	// current end of file), matching scanSegment's payloadOff arithmetic.
+	payloadOff := size + recHeaderLen
+	if err := encodeRecord(s.activeFile, e); err != nil {
+		return 0, fmt.Errorf("file storage: write record at index %d: %w", e.Index, err)
+	}
+	return payloadOff, nil
+}
+
+// TruncateSuffix discards every entry with index >= from and fsyncs before
+// returning (STOR-04). It is a no-op (nil) when from > LastIndex(), and an
+// error when from < 1. On disk it truncates the segment holding `from` at
+// that entry's record start, Removes any wholly-later segments, then Syncs
+// the truncated segment and SyncDir(dir) before returning.
+func (s *Storage) TruncateSuffix(from raft.Index) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	last := s.lastIndexLocked()
+	if from > last {
+		return nil
+	}
+	if from < 1 {
+		return fmt.Errorf("file storage: truncate at invalid index %d", from)
+	}
+
+	// Locate the in-RAM index position of `from` (idx is index-ordered from
+	// firstIndex==1, so position == from-1 in v1).
+	pos := int(from - 1)
+	target := s.idx[pos]
+
+	// Every segment strictly after target.segment is wholly truncated away.
+	// Collect their names (unique, in order) so they can be Removed.
+	laterSegs := make([]string, 0)
+	seen := map[string]bool{target.segment: true}
+	for _, ie := range s.idx[pos:] {
+		if ie.segment != target.segment && !seen[ie.segment] {
+			seen[ie.segment] = true
+			laterSegs = append(laterSegs, ie.segment)
+		}
+	}
+
+	// Truncate the target segment at the record start of `from` (the payload
+	// offset minus the record header).
+	cut := target.offset - recHeaderLen
+	tf, err := s.fs.OpenAppend(s.path(target.segment))
+	if err != nil {
+		return fmt.Errorf("file storage: open segment %q for truncate: %w", target.segment, err)
+	}
+	if err := tf.Truncate(cut); err != nil {
+		return fmt.Errorf("file storage: truncate %q to %d: %w", target.segment, cut, errors.Join(err, tf.Close()))
+	}
+	if err := tf.Sync(); err != nil {
+		return fmt.Errorf("file storage: sync truncated %q: %w", target.segment, errors.Join(err, tf.Close()))
+	}
+
+	// Remove wholly-later segments. Close the current active handle first if
+	// it points at one of them (it will be reset to the truncated tail).
+	if s.activeFile != nil {
+		if err := s.activeFile.Close(); err != nil {
+			return fmt.Errorf("file storage: close active on truncate: %w", errors.Join(err, tf.Close()))
+		}
+		s.activeFile = nil
+	}
+	for _, name := range laterSegs {
+		if err := s.fs.Remove(s.path(name)); err != nil {
+			return fmt.Errorf("file storage: remove segment %q on truncate: %w", name, errors.Join(err, tf.Close()))
+		}
+	}
+	// Make the truncation + removals durable (STOR-04).
+	if err := s.fs.SyncDir(s.dir); err != nil {
+		return fmt.Errorf("file storage: syncdir after truncate: %w", errors.Join(err, tf.Close()))
+	}
+
+	// The truncated segment becomes the active append target again. Recount
+	// the entries it retains from the surviving in-RAM index.
+	retained := 0
+	for _, ie := range s.idx[:pos] {
+		if ie.segment == target.segment {
+			retained++
+		}
+	}
+	s.idx = s.idx[:pos]
+	s.active = target.segment
+	s.activeFile = tf
+	s.activeCount = retained
+	return nil
+}
 
 // Entries is a temporary stub replaced by Task 3 of this plan.
 func (s *Storage) Entries(lo, hi raft.Index) ([]raft.Entry, error) { return nil, nil }
