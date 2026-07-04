@@ -27,8 +27,14 @@ jobs:
           check-latest: true
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8
         with:
+          # golangci-lint-action MUST be v7+ for golangci-lint v2 — the v6
+          # action targets v1 and, in goinstall mode, resolves the v1 module
+          # path (…/golangci-lint/cmd/golangci-lint) which has no v2 tags
+          # ("unknown revision cmd/golangci-lint/v2.12.2"). v8 is v2-aware and
+          # uses the /v2/ module path.
+          #
           # Pinned to a v2 release (Phase 14 / QUAL-01). ADR-0003 migrated
           # .golangci.yml to the v2 schema (version: "2") on 2026-07-04, so
           # the pin MUST be a v2 binary — the v2 parser cannot read a v1
