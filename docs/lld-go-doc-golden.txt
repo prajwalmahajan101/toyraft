@@ -794,6 +794,24 @@ func (h *Hub) Delay(minDelay, maxDelay time.Duration)
     the deterministic min value is applied with no RNG draw (zero-span is the
     recommended way to write delay-only tests).
 
+func (h *Hub) DrainDueSync()
+    DrainDueSync delivers every message whose deliverAt <= clk.Now() onto
+    its receiver's inbound channel, SYNCHRONOUSLY on the calling goroutine,
+    and returns once the heap holds no more due messages. It is the SyncDelivery
+    counterpart to the dispatch loop: same drain (drainDueLocked) + same reorder
+    (orderLocked), but with NO goroutine handoff and NO wall-clock wait — so
+    the set of messages a given logical instant delivers is a pure function
+    of (seed, FakeClock state, chaos seed). This is what makes a chaos run
+    byte-deterministic under FakeClock (ADR-0017); the async dispatcher's
+    2ms-sleep-quiesce window made "which drain observes a delivery" depend on
+    wall-clock, diverging the committed set run-to-run.
+
+    Contract: valid only on a Hub built with HubConfig.SyncDelivery (no
+    competing dispatcher goroutine drains the same heap). Delivery is a blocking
+    channel send guarded by h.ctx.Done so a Close during a full-buffer send
+    unblocks; callers (raftest.Cluster) drain inbound between passes so the
+    bounded buffer does not fill in practice.
+
 func (h *Hub) DropRate(id raft.NodeID, p float64)
     DropRate sets the per-Send drop probability for messages originating from
     id. p == 0 disables drops; p == 1 drops every message. Out-of- range values
@@ -846,6 +864,16 @@ type HubConfig struct {
 	// CloseTimeout caps how long Close waits for the dispatcher to exit
 	// before declaring leak. Default 100ms per SC4.
 	CloseTimeout time.Duration
+
+	// SyncDelivery selects the SYNCHRONOUS delivery model: when true, NewHub
+	// does NOT start the background dispatcher goroutine, and the caller must
+	// pump due messages onto receiver inbound channels itself via DrainDueSync.
+	// This gives a byte-deterministic delivery schedule under FakeClock with no
+	// goroutine/wall-clock handoff — the seam internal/raftest.Cluster.Tick uses
+	// so `same seed -> byte-identical trace` holds under chaos (ADR-0017). The
+	// default (false) keeps the async single-dispatcher model used by every
+	// other caller (hub_test / chaos_test / transporttest conformance).
+	SyncDelivery bool
 }
     HubConfig configures a Hub. Zero-value-safe modulo Clock: NewHub returns
     an actionable error when Clock is nil (FOUND-05 spirit). InboundCap and

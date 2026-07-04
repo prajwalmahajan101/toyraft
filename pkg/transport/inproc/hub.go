@@ -85,8 +85,13 @@ func NewHub(cfg HubConfig) (*Hub, error) {
 		chaos:  newChaos(cfg.Seed),
 	}
 
-	h.wg.Add(1)
-	go h.dispatch()
+	// In SyncDelivery mode the caller pumps deliveries via DrainDueSync; there
+	// is no background dispatcher goroutine to start (or to join in Close). The
+	// async model starts the single dispatcher as before.
+	if !cfg.SyncDelivery {
+		h.wg.Add(1)
+		go h.dispatch()
+	}
 
 	return h, nil
 }
