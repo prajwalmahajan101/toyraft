@@ -25,7 +25,8 @@ const raftMessagePath = "/raft/message"
 //
 // All timing routes through cfg.Clock (backoff sleeps). The ONE sanctioned
 // wall-clock use is context.WithTimeout for the per-request deadline (stdlib
-// context reads time.Now internally); this package calls time.Now nowhere.
+// context reads the monotonic clock internally); this package reads the wall
+// clock only via cfg.Clock.
 type client struct {
 	cfg  Config
 	http *http.Client
@@ -79,10 +80,7 @@ func (c *client) Send(ctx context.Context, msg raft.Message) error {
 		defer cancel()
 	}
 
-	attempts := c.cfg.Backoff.MaxAttempts
-	if attempts < 1 {
-		attempts = 1
-	}
+	attempts := max(c.cfg.Backoff.MaxAttempts, 1)
 
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
@@ -146,7 +144,7 @@ func (c *client) backoffDelay(n int) time.Duration {
 	}
 	factor := c.cfg.Backoff.Factor
 	d := float64(base)
-	for i := 0; i < n; i++ {
+	for range n {
 		d *= factor
 	}
 	return time.Duration(d)
