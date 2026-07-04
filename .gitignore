@@ -12,6 +12,9 @@
 bin/
 dist/
 
+# Per-run chaos suite history dumps (Phase 11) — NOT committed fixtures
+test/artifacts/
+
 # Dependency directories
 vendor/
 
