@@ -85,8 +85,8 @@ alongside the PR URL of the first green run.
 ### Required-check names
 
 Branch protection requires picking check names from a dropdown that
-only lists checks GitHub has already observed. These are the **seven
-required-check names** that `.github/workflows/ci.yml` produces — pick
+only lists checks GitHub has already observed. These are the
+required-check names that `.github/workflows/ci.yml` produces — pick
 exactly these in the UI, verbatim, including spaces and parentheses:
 
 - `lint`
@@ -96,6 +96,15 @@ exactly these in the UI, verbatim, including spaces and parentheses:
 - `test (macos-latest / go 1.26.x)`
 - `commitlint`
 - `build (cross-compile)`
+- `netns`
+
+> **Amended 2026-07-04 (Phase 13 / ADR-0020):** the dedicated `netns`
+> job adds an 8th required check (the seven above plus `netns`). Branch
+> protection on `main` was updated to require it via `gh api` — see
+> `.journal/M13.md` for the `gh api` before/after replay and the
+> non-regression diff proving the existing seven contexts and the other
+> protection toggles survived. See [ADR-0020] for the netns/iptables
+> chaos design and the dedicated-job rationale.
 
 These names come from the `name:` fields in `.github/workflows/ci.yml`
 (top-level for `lint` / `commitlint` / `build`, and the matrix-templated
@@ -188,3 +197,4 @@ for the full pattern / pitfall analysis behind every choice above.
 [toykv]: https://github.com/prajwalmahajan101/toykv
 [toymq]: https://github.com/prajwalmahajan101/toymq
 [ADR-0003]: ./0003-golangci-lint-config.md
+[ADR-0020]: ./0020-netns-iptables-chaos-and-dedicated-ci-job.md
