@@ -1,47 +1,58 @@
 # golangci-lint configuration for toyraft.
 #
-# Schema: v1 (matches the `golangci-lint-action@v6 + version: latest` binary
-# served on GitHub Actions runners). The v2 schema is not yet accepted by
-# that pinned version; revisit when ADR-0003 is updated.
+# Schema: v2 (version: "2"). Migrated from the v1 schema on 2026-07-04
+# (Phase 14 / QUAL-01) via `golangci-lint migrate` — see
+# docs/adr/0003-golangci-lint-config.md. The v2 binary cannot parse a v1
+# config, so this config is bumped in lockstep with the CI action pin.
 #
 # Policy:
 #   - Correctness findings (govet, errcheck, staticcheck, ineffassign, unused)
-#     are BLOCKING.
+#     are BLOCKING. In v2, staticcheck subsumes the old gosimple + stylecheck
+#     families (S/QF/ST checks).
 #   - Style findings (revive, misspell) are advisory but enforced in CI to
 #     keep diffs clean.
 #   - gosec deliberately excluded — see docs/adr/0003-golangci-lint-config.md
 #     (false-positive rate too high for math/rand-with-seeds patterns).
-
+version: "2"
 run:
-  timeout: 5m
+  go: "1.26"
   tests: true
-  # Analysis target matches go.mod. The CI workflow uses
-  # install-mode: goinstall so golangci-lint is built from source with
-  # the runner's Go 1.26 toolchain (the prebuilt binary cannot parse
-  # 1.26 source).
-  go: '1.26'
-
 linters:
-  disable-all: true
+  default: none
   enable:
     - errcheck
     - govet
     - ineffassign
-    - staticcheck
-    - unused
     - misspell
     - revive
-
-linters-settings:
-  revive:
+    - staticcheck
+    - unused
+  settings:
+    revive:
+      rules:
+        - name: var-naming
+        - name: error-return
+        - name: unexported-return
+        - name: blank-imports
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
     rules:
-      - name: var-naming
-      - name: error-return
-      - name: unexported-return
-      - name: blank-imports
-
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
+      - linters:
+          - errcheck
+        path: _test\.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
