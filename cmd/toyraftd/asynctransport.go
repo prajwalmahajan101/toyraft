@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"expvar"
 	"sync"
 
 	"github.com/prajwalmahajan101/toyraft/pkg/raft"
@@ -34,6 +35,14 @@ import (
 type asyncTransport struct {
 	inner raft.Transport
 
+	// Observability counters (OBS-04). These live DAEMON-SIDE on the transport
+	// wrapper — never in pkg/raft — so the single-mutex core (ADR-0004) and its
+	// stdlib-only ethos stay untouched. rpcSent increments at the Send enqueue
+	// seam; rpcReceived increments in a counting closure wrapping the registered
+	// step callback (the one point every inbound message flows through).
+	rpcSent     *expvar.Int
+	rpcReceived *expvar.Int
+
 	mu     sync.Mutex
 	queues map[raft.NodeID]chan raft.Message
 	wg     sync.WaitGroup
@@ -48,11 +57,13 @@ const asyncQueueDepth = 16
 
 // newAsyncTransport wraps inner so Send is non-blocking. The wrapper owns the
 // per-peer drain goroutines; call Close to join them.
-func newAsyncTransport(inner raft.Transport) *asyncTransport {
+func newAsyncTransport(inner raft.Transport, rpcSent, rpcReceived *expvar.Int) *asyncTransport {
 	return &asyncTransport{
-		inner:  inner,
-		queues: make(map[raft.NodeID]chan raft.Message),
-		stopCh: make(chan struct{}),
+		inner:       inner,
+		rpcSent:     rpcSent,
+		rpcReceived: rpcReceived,
+		queues:      make(map[raft.NodeID]chan raft.Message),
+		stopCh:      make(chan struct{}),
 	}
 }
 
@@ -60,6 +71,10 @@ func newAsyncTransport(inner raft.Transport) *asyncTransport {
 // it NEVER blocks on the network. A full queue drops the message (best-effort;
 // the next heartbeat is the retry, per the raft.Transport contract).
 func (a *asyncTransport) Send(_ context.Context, msg raft.Message) error {
+	// Count at enqueue (not at drain): a dropped-full-queue message still counts
+	// as an ATTEMPTED send, consistent with the fire-and-forget contract where
+	// the next heartbeat is the retry (raft.rpc.sent, OBS-04).
+	a.rpcSent.Add(1)
 	q := a.queueFor(msg.To)
 	if q == nil { // Close already ran — silently drop.
 		return nil
@@ -107,10 +122,21 @@ func (a *asyncTransport) drain(q chan raft.Message) {
 	}
 }
 
-// Register installs the inbound callback on the wrapped transport unchanged —
-// inbound delivery is not on the tick-loop hot path and needs no decoupling.
+// Register installs the inbound callback on the wrapped transport. It wraps the
+// step callback in a counting closure so raft.rpc.received increments once per
+// inbound wire message BEFORE delegating to node.Step — Register is the ONE
+// daemon-side point every inbound message flows through (pkg/raft calls
+// Transport.Register(n.Step) internally), which keeps expvar entirely out of the
+// core. Inbound wire messages are never MsgTick (Tick is core-internal), but
+// guard defensively so the counter can only ever reflect real received RPCs.
 func (a *asyncTransport) Register(step func(ctx context.Context, msg raft.Message) error) {
-	a.inner.Register(step)
+	counted := func(ctx context.Context, msg raft.Message) error {
+		if msg.Type != raft.MsgTick {
+			a.rpcReceived.Add(1)
+		}
+		return step(ctx, msg)
+	}
+	a.inner.Register(counted)
 }
 
 // Close stops the drain goroutines (idempotent) and then closes the wrapped

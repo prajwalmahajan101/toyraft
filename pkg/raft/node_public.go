@@ -174,10 +174,11 @@ func New(cfg Config) (Node, error) {
 func (n *nodeImpl) Status() Status {
 	n.core.mu.Lock()
 	s := Status{
-		Role:        n.core.role,
-		Term:        n.core.currentTerm,
-		CommitIndex: n.core.commitIndex,
-		LeaderHint:  n.core.leaderHint,
+		Role:         n.core.role,
+		Term:         n.core.currentTerm,
+		CommitIndex:  n.core.commitIndex,
+		LastLogIndex: n.core.log.LastIndex(),
+		LeaderHint:   n.core.leaderHint,
 	}
 	// matchIndex is leader-only; followers expose nil (LLD §3). Clone under the
 	// lock so the caller owns the map.
