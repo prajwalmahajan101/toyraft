@@ -29,26 +29,37 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          # Pinned to a v1 release because the action's `version: latest`
-          # flips between v1 and v2 binaries across runs (the v2 module
-          # path differs), and our `.golangci.yml` follows the v1 schema
-          # (sibling parity with toymq + toykv). Revisit when ADR-0003
-          # migrates to v2.
-          version: v1.62.0
+          # Pinned to a v2 release (Phase 14 / QUAL-01). ADR-0003 migrated
+          # .golangci.yml to the v2 schema (version: "2") on 2026-07-04, so
+          # the pin MUST be a v2 binary — the v2 parser cannot read a v1
+          # config and vice versa. toyraft leads the trilogy to v2; siblings
+          # (toymq + toykv) stay on v1 for now (deliberate, per 14-CONTEXT).
+          # A pinned v2.x.y (not `latest`) keeps CI reproducible. Pinned to
+          # the exact release the migrated config was verified clean against
+          # (`golangci-lint run ./...` exit 0 locally on 2.12.2).
+          version: v2.12.2
           # goinstall mode is REQUIRED for Go 1.26 source — the prebuilt
-          # binary ships compiled with Go 1.24 and cannot parse 1.26
+          # binary ships compiled with an older Go and cannot parse 1.26
           # packages (Pitfall 1, sibling-verbatim invariant).
           install-mode: goinstall
-          args: --timeout=5m
 
   test:
-    name: test (${{ matrix.os }} / go ${{ matrix.go }})
+    name: test (${{ matrix.os }} / go ${{ matrix.go }} / ${{ matrix.race && 'race' || 'no-race' }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
         go: ['1.25.x', '1.26.x']
+        # QUAL-03: cover {linux,macOS} x {race, no-race}. The race axis gates
+        # the -race flag (see the RACE env below). no-race is faster and
+        # exercises the un-instrumented build path; race is the correctness
+        # gate. Both must stay green.
+        race: [true, false]
+    env:
+      # Empty when matrix.race is false, "-race" when true. Each go-test step
+      # below interpolates $RACE so a single matrix drives both build modes.
+      RACE: ${{ matrix.race && '-race' || '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -69,15 +80,16 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      - name: go test -race
-        # Excludes ./test/chaos/... AND ./test/linearizability/... — those
-        # trees are run by their dedicated steps below so they aren't swept
-        # twice per matrix cell (the process-kill harness boots 5 real
-        # daemons under -race, which is slow on macOS runners; the
-        # linearizability step is the single home for the no-retry
-        # correctness comment). Making each dedicated step the single source
-        # also gives clean failure attribution.
-        run: go test -race -timeout 5m $(go list ./... | grep -Ev '/test/(chaos|linearizability)/')
+      - name: go test ($RACE)
+        # $RACE is "-race" on the race matrix leg and "" on the no-race leg
+        # (QUAL-03: {linux,macOS} x {race,no-race}). Excludes ./test/chaos/...
+        # AND ./test/linearizability/... — those trees are run by their
+        # dedicated steps below so they aren't swept twice per matrix cell
+        # (the process-kill harness boots 5 real daemons, slow on macOS
+        # runners; the linearizability step is the single home for the
+        # no-retry correctness comment). Making each dedicated step the
+        # single source also gives clean failure attribution.
+        run: go test $RACE -timeout 5m $(go list ./... | grep -Ev '/test/(chaos|linearizability)/')
 
       - name: Chaos suite (seeded inproc matrix + process-kill — CHAOS-07/SC5)
         # Phase 11 SC5: a chaos failure is TERMINAL and fails the build on
@@ -90,7 +102,7 @@ jobs:
         # are POSIX, so it runs on each. The step lives inside the existing
         # `test` job so no new required-status-check name is introduced
         # (ADR-0002 + branch protection unchanged).
-        run: go test -race -timeout 10m ./test/chaos/...
+        run: go test $RACE -timeout 10m ./test/chaos/...
 
       - name: Linearizability suite (Porcupine KV-register + Figure 7/8 — LIN-04/SC5)
         # Phase 12 SC5: a linearizability failure is TERMINAL and fails the
@@ -101,7 +113,7 @@ jobs:
         # matrix OSes with no flakiness budget. The step lives inside the
         # existing `test` job so no new required-status-check name is
         # introduced (ADR-0002 + branch protection unchanged).
-        run: go test -race -timeout 5m ./test/linearizability/...
+        run: go test $RACE -timeout 5m ./test/linearizability/...
 
       - name: Test (raftdebug build tag — invariant negative tests)
         # Per ADR-0004 + .planning/phases/02-foundations/02-RESEARCH.md §6.3 /
@@ -110,7 +122,7 @@ jobs:
         # documented. NO `if:` modifier — SC4 is a correctness gate and must
         # run on BOTH push and pull_request events (contrast with the fuzz
         # step from plan 02-06 which IS gated to pull_request only).
-        run: go test -tags raftdebug -race -timeout 5m ./pkg/raft
+        run: go test -tags raftdebug $RACE -timeout 5m ./pkg/raft
 
       - name: LLD drift check (SC6)
         # Per .planning/phases/02-foundations/02-RESEARCH.md §8 Option B and
