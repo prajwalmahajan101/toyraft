@@ -69,8 +69,8 @@ type idxEntry struct {
 }
 
 // Compile-time interface assertion (repo convention; catches drift if
-// storage.Storage grows). The HardState methods (SaveHardState/LoadHardState)
-// are stubbed here and replaced with the real fsync+rename impl in 08-04.
+// storage.Storage grows). SaveHardState/LoadHardState are defined in
+// hardstate.go (08-04); the log/read methods are here.
 var _ storage.Storage = (*Storage)(nil)
 
 // segSuffix is the segment file extension; recovery filters ReadDir on it.
@@ -223,20 +223,10 @@ func (s *Storage) Restore(data []byte) error {
 	return storage.ErrSnapshotUnsupported
 }
 
-// --- Temporary stubs replaced in later plans/tasks ---
-//
-// These keep pkg/storage/file compiling as a standalone package (the
-// interface assertion above needs every method present) before the real
-// implementations land. Append/TruncateSuffix and the four read methods are
-// implemented in this plan's Tasks 2 and 3; SaveHardState/LoadHardState land
-// in 08-04. Each is replaced in place — do not add fields for them here.
-
-// SaveHardState is a temporary no-op stub; the real fsync+rename impl lands
-// in 08-04 (hardstate.go).
-func (s *Storage) SaveHardState(hs raft.HardState) error { return nil }
-
-// LoadHardState is a temporary no-op stub; the real impl lands in 08-04.
-func (s *Storage) LoadHardState() (raft.HardState, error) { return raft.HardState{}, nil }
+// SaveHardState and LoadHardState (the StateStorage side of storage.Storage)
+// live in hardstate.go — the atomic tmp-file + fsync + rename + parent-dir
+// fsync recipe (08-04). The *Storage value satisfies the full 10-method
+// contract only once that file is present.
 
 // errNonContiguous is wrapped by Append when entries do not start at
 // LastIndex()+1 or are not strictly increasing by 1 — matching the memory
