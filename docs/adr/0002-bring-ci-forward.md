@@ -106,6 +106,26 @@ exactly these in the UI, verbatim, including spaces and parentheses:
 > protection toggles survived. See [ADR-0020] for the netns/iptables
 > chaos design and the dedicated-job rationale.
 
+> **Amended 2026-07-05 (Phase 14 / QUAL-03):** the `test` job gained a
+> `race: [true, false]` matrix axis, so each of the four `test` cells
+> **split into two** — `test (<os> / go <ver> / race)` and
+> `.../no-race)`. The four original `test (<os> / go <ver>)` names no
+> longer report, which stranded branch protection (GitHub reported
+> "4 of 8 required status checks are expected" and blocked merge — even
+> `--admin`). Branch protection on `main` was **reconciled and relaxed**
+> for this solo repo via the narrow
+> `gh api --method PATCH .../branches/main/protection/required_status_checks`
+> call: the required contexts are now the **12** live names — `lint`,
+> `commitlint`, `build (cross-compile)`, `netns`, and the eight
+> `test (<os> / go <ver> / race|no-race)` cells — and `strict` (require
+> branch up-to-date-with-base before merge) was turned **off** to cut
+> friction on a single-maintainer project. `required_approving_review_count`
+> was already `0` (self-merge, per the "maintainer only" note above), so
+> reviews were never the blocker. Lesson: pinning matrix-cell check names
+> is fragile — any matrix change must update this list in the same commit.
+> The canonical required set is now the 12 names above, not the 8 in the
+> pre-amendment list.
+
 These names come from the `name:` fields in `.github/workflows/ci.yml`
 (top-level for `lint` / `commitlint` / `build`, and the matrix-templated
 `name: test (${{ matrix.os }} / go ${{ matrix.go }})` for the four `test`
