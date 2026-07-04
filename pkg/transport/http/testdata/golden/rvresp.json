@@ -1,0 +1,7 @@
+{
+  "type": 1,
+  "term": 7,
+  "from": "node-2",
+  "to":   "node-1",
+  "vote_granted": true
+}
