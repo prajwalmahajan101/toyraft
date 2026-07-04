@@ -169,14 +169,14 @@ func doGet(client *http.Client, base, key string) (string, error) {
 		return "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	switch {
-	case resp.StatusCode == http.StatusOK:
+	switch resp.StatusCode {
+	case http.StatusOK:
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return "", err
 		}
 		return string(body), nil
-	case resp.StatusCode == http.StatusNotFound:
+	case http.StatusNotFound:
 		return "", errNotFound
 	default:
 		return "", envelopeError(resp)
