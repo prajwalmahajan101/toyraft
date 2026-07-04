@@ -81,6 +81,7 @@ type harness struct {
 
 	// Per-run topology names, randomized from the pid for idempotency (Pitfall 4).
 	bridge string   // root-ns bridge, e.g. "br-tr-12345"
+	gwIP   string   // the bridge's host IP in the node subnet, "10.<octet>.0.254" (root-ns route)
 	nss    []string // the 3 namespace names, "tr-<pid>-n{0,1,2}"
 	ips    []string // "10.<octet>.0.1{0,1,2}", octet = pid%250 + 1
 }
@@ -137,6 +138,14 @@ func newHarness(t *testing.T, seed int64) *harness {
 		bin:    bin,
 		seed:   seed,
 		bridge: fmt.Sprintf("br-tr-%d", pid),
+		// The bridge's OWN host IP in the node subnet. REQUIRED (not optional): the
+		// test process polls each node's /status from the ROOT namespace, so the root
+		// ns needs a connected route to 10.<octet>.0.0/24 — which only exists once the
+		// bridge carries an address in that subnet. Without it the cluster elects a
+		// leader fine internally (ns<->ns over the bridge) but the test can never
+		// OBSERVE it (every root-ns poll to 10.x.0.1i:9001 fails) → "no initial
+		// leader" (DEBUG.md, 2026-07-04). .254 is the conventional gateway host.
+		gwIP: fmt.Sprintf("10.%d.0.254", octet),
 		// ONE shared 307-following client with SHORT timeouts so a poll against a
 		// dead/frozen/partitioned node returns fast. DEFAULT redirect policy follows
 		// 307 like toyraftctl.
@@ -162,8 +171,12 @@ func newHarness(t *testing.T, seed int64) *harness {
 	}
 	_ = h.runQuiet("sudo", "ip", "link", "del", h.bridge)
 
-	// Create the root-ns bridge.
+	// Create the root-ns bridge and give it a host IP in the node subnet. The IP is
+	// what lets the ROOT-namespace test process reach each node's /status API over the
+	// bridge (connected route to 10.<octet>.0.0/24); without it the cluster is healthy
+	// but unobservable from the test (DEBUG.md, 2026-07-04).
 	h.run(t, "sudo", "ip", "link", "add", h.bridge, "type", "bridge")
+	h.run(t, "sudo", "ip", "addr", "add", h.gwIP+"/24", "dev", h.bridge)
 	h.run(t, "sudo", "ip", "link", "set", h.bridge, "up")
 
 	// For each node: a namespace, a veth pair (ns end + bridge end), address the ns
@@ -184,7 +197,14 @@ func newHarness(t *testing.T, seed int64) *harness {
 
 	// Sanity check (Pitfall 5): a wiring bug fails HERE with a clear message instead
 	// of a mysterious no-leader timeout downstream.
+	//
+	// (a) ns<->ns: proves the consensus plane (bridge-switched, same subnet) works.
 	h.run(t, "sudo", "ip", "netns", "exec", h.nss[0], "ping", "-c1", "-W1", h.ips[1])
+	// (b) root->ns: proves the OBSERVATION path works — the test polls /status from the
+	// root ns, so the root ns must reach the node subnet over the bridge. This is the
+	// exact path the missing bridge IP broke; the guard turns that regression into a
+	// clear setup failure instead of a downstream "no initial leader" (DEBUG.md).
+	h.run(t, "sudo", "ping", "-c1", "-W1", h.ips[0])
 
 	// Shared -peers spec from the namespace IPs (all share peer port 7001 — each is in
 	// its own netns, so no collision).
