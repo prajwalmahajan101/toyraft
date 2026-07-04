@@ -1,0 +1,88 @@
+# GoReleaser configuration for ToyRaft (SC8 / QUAL-07).
+#
+# Ships BOTH reference binaries — the `toyraftd` daemon and the `toyraftctl`
+# CLI — for {linux,macOS} x {amd64,arm64}. Shipping the CLI alongside the
+# daemon is a deliberate, user-approved deviation from SC8's "toyraftd only"
+# wording (parity with the sibling toykv/toymq releases, which ship their
+# CLIs). See docs/adr/0022-goreleaser-dual-binary-release.md.
+#
+# The LIBRARY package (github.com/prajwalmahajan101/toyraft) is NOT a
+# goreleaser build — it releases via plain git semver tags (QUAL-08). Only
+# the two commands under ./cmd are compiled here.
+#
+# v2 schema note: the darwin -> macOS archive naming uses a name_template
+# CONDITIONAL, not the `archives.replacements` key (REMOVED in goreleaser v2 —
+# `goreleaser check` fails on it).
+version: 2
+
+project_name: toyraft
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  # The reference daemon. version/commit/date bind to the cmd/toyraftd
+  # package-level vars added in Plan 14-01 (main.version/commit/date), stamped
+  # by goreleaser at release time.
+  - id: toyraftd
+    main: ./cmd/toyraftd
+    binary: toyraftd
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+  # The reference CLI. cmd/toyraftctl declares NO version/commit/date package
+  # vars, so its ldflags carry only the -s -w strip flags (no -X bindings).
+  - id: toyraftctl
+    main: ./cmd/toyraftctl
+    binary: toyraftctl
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  # One tar.gz per os/arch bundling BOTH binaries plus the docs. The darwin OS
+  # renders as "macos" (house style shared with toykv/toymq) via a
+  # name_template conditional — NEVER a `replacements:` block.
+  - id: default
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_
+      {{- if eq .Os "darwin" }}macos{{- else }}{{ .Os }}{{- end }}_
+      {{- .Arch }}
+    files:
+      - README.md
+      - LICENSE
+      - docs/SECURITY.md
+
+checksum:
+  name_template: SHA256SUMS
+  algorithm: sha256
+
+snapshot:
+  version_template: '{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}'
+
+changelog:
+  use: github
+  sort: asc
