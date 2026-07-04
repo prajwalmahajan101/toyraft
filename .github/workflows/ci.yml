@@ -158,3 +158,47 @@ jobs:
           for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
             GOOS=${target%/*} GOARCH=${target#*/} go build ./...
           done
+
+  netns:
+    name: netns
+    # SC3 (CHAOS-04 / Phase 13): the iptables/netns partition chaos runs on a
+    # DEDICATED linux-amd64 runner only — GitHub ubuntu runners are amd64 and
+    # ship passwordless sudo + iproute2 + iptables. A DEDICATED job (not a
+    # guarded step in `test`) is a deliberate reading of SC3's "linux-amd64
+    # entry only": it runs on exactly one linux-amd64 runner and never touches
+    # macOS. It adds exactly one new required-check name `netns` — recorded in
+    # ADR-0002's amended required-check list + ADR-0020 and enforced via branch
+    # protection (Task 3). Terminal-failure discipline (Phase 11): the run step
+    # below carries no conditional guard, no failure-tolerating modifier, and no
+    # re-run loop — a netns partition failure fails the build outright.
+    # The netns package is tag-gated (//go:build linux && netns) so no existing
+    # job compiles it: the `test` job's default race step excludes
+    # /test/(chaos|linearizability)/ AND the tag keeps the tree out of the
+    # ./test/chaos/... chaos step too, so the netns tree runs ONLY here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: netns capability probe (fail loudly on a runner gap)
+        # RESEARCH Open-Q1: surface an iptables/netns capability gap HERE with a
+        # clear message rather than mid-test. If the runner cannot create a
+        # namespace, the whole job fails at this step, not deep in the harness.
+        run: |
+          set -euxo pipefail
+          sudo iptables --version
+          sudo ip netns add probe
+          sudo ip netns del probe
+
+      - name: netns partition chaos (CHAOS-04 / SC1)
+        # sudo -E env "PATH=$PATH" preserves PATH + GOCACHE/HOME so `go` and the
+        # built toyraftd resolve and the daemons spawned via `sudo ip netns exec`
+        # land in their namespaces. The race detector is deliberately omitted:
+        # the test orchestrates external daemons, so instrumenting the
+        # (barely-concurrent) test process adds cost with no signal (RESEARCH
+        # Open-Q3). The step is terminal — a plain run with no modifiers.
+        run: sudo -E env "PATH=$PATH" go test -tags=netns -timeout 10m ./test/chaos/netns
