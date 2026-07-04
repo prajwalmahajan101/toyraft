@@ -26,15 +26,40 @@ binary-only releases and vice versa, by partitioning the tag namespace.
 ToyRaft follows [Semantic Versioning 2.0.0][semver].
 
 - `v<major>.<minor>.<patch>` — both library and binary.
-- Pre-1.0 (`v0.x.y`): minor-bump = breaking allowed, patch-bump =
-  non-breaking. We treat the public API as "ratifying" during the v0
-  series; once consumers start depending on a release in production we
-  cut `v1.0.0`.
-- 1.0+: standard semver — `MAJOR` for breaking changes, `MINOR` for
+- **The completed 14-phase roadmap ships as `v1.0.0`** — the first SemVer
+  release. This matches the toy-trilogy house standard: sibling projects
+  [toykv][toykv] and [toymq][toymq] both cut `v1.0.0` on roadmap completion
+  (toymq then continued `v1.1.0`, `v1.2.0`, …). ToyRaft is spec-complete and
+  linearizability-verified by the end of the roadmap (Phase 12 is the
+  acceptance gate), so `v1.0.0` — not a `v0.x` series — is the correct first
+  release.
+- **Pre-`v1.0.0` development uses lightweight milestone tags**, not SemVer
+  version tags: each roadmap phase/milestone gets a tag `mN` (e.g. `m9` after
+  Phase 9 merges), following toykv. Only `v1.0.0` and beyond use SemVer tags,
+  so the Go module proxy does not surface in-progress phases as library
+  releases.
+- `1.0+`: standard semver — `MAJOR` for breaking changes, `MINOR` for
   additive, `PATCH` for fixes.
-- Pre-release suffixes use SemVer's hyphen-separated form: `v0.3.0-rc.1`.
+- Pre-release suffixes use SemVer's hyphen-separated form: `v1.0.0-rc.1`.
+
+### Where `rc-1` sits
+
+`v1.0.0-rc.1` is the release candidate for `v1.0.0`. It is cut at the **tail of
+Phase 14** (the Release phase), and only after the two hard gates upstream of it:
+
+1. **Phase 12 — Linearizability** is the v1 *acceptance gate*: Porcupine must
+   pass the recorded chaos histories against the KV register spec. No rc before
+   this proves correctness.
+2. **Phase 14 — Release infra**: GoReleaser binary build, observability
+   counters, ADR backfill, and the release README all land here.
+
+Sequence: `m1 … m14` (per-phase, during development) → `v1.0.0-rc.1` (end of
+Phase 14, gates green) → `v1.0.0` (final, on roadmap completion). Tagging any rc
+before Phase 12 + Phase 14 is premature.
 
 [semver]: https://semver.org/spec/v2.0.0.html
+[toykv]: https://github.com/prajwalmahajan101/toykv
+[toymq]: https://github.com/prajwalmahajan101/toymq
 
 ## Tag Conventions
 
@@ -43,8 +68,9 @@ crossing wires:
 
 | Artefact      | Tag format                          | Example                  |
 | ------------- | ----------------------------------- | ------------------------ |
-| Library       | `v<major>.<minor>.<patch>`          | `v0.1.0`, `v0.2.0-rc.1`  |
-| Demo binary   | `toyraftd/v<major>.<minor>.<patch>` | `toyraftd/v0.1.0`        |
+| Milestone     | `m<phase>` (pre-1.0, lightweight)   | `m9`, `m14`              |
+| Library       | `v<major>.<minor>.<patch>`          | `v1.0.0`, `v1.0.0-rc.1`  |
+| Demo binary   | `toyraftd/v<major>.<minor>.<patch>` | `toyraftd/v1.0.0`        |
 
 **Why two prefixes:** Go's module proxy treats any `v<…>` tag at the
 repo root as a library release and notifies consumers. If we used the
