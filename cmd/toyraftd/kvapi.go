@@ -176,9 +176,12 @@ func (h *kvHandler) handleGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *kvHandler) handleStatus(w http.ResponseWriter, r *http.Request) {
-	if !h.leaderGate(w, r) {
-		return
-	}
+	// SC3: /status is NOT leader-gated. Every node answers with its OWN snapshot
+	// as JSON so followers report role/term/commit/apply/leader_hint too (no 307
+	// redirect) — strictly better for leader discovery (a follower's leader_hint
+	// points at the leader). On a follower MatchIndex is nil, so members
+	// serializes as an empty object, which is correct. The /kv/* handlers KEEP
+	// leaderGate (writes + leader-only reads stay leader-routed).
 	s := h.node.Status()
 	members := make(map[string]uint64, len(s.MatchIndex))
 	for id, idx := range s.MatchIndex {
