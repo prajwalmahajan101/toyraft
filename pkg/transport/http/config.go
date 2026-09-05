@@ -30,8 +30,9 @@ type Config struct {
 	// an error the driver logs-and-drops (best-effort send, WIRE §1).
 	PeerURLs map[raft.NodeID]string
 
-	// Clock is the sole time source for send timeouts and backoff. MUST be
-	// non-nil; use internal/clock.Real in production, a Fake in tests.
+	// Clock is the sole time source for send timeouts and backoff. Optional; a
+	// nil Clock defaults to the real clock in New (parity with raft.Config).
+	// Injecting a Fake requires internal access and is for in-module tests only.
 	Clock clock.Clock
 
 	// SendTimeout bounds a single outbound POST /raft/message attempt.
@@ -47,6 +48,15 @@ type Config struct {
 
 	// ShutdownTimeout bounds graceful server drain on Close (09-03).
 	ShutdownTimeout time.Duration
+}
+
+// applyDefaults fills a nil Clock with the real clock so external consumers —
+// who cannot construct internal/clock — can build the transport by leaving
+// Clock unset. Mirrors pkg/raft.Config.applyDefaults; called by New before Validate.
+func (c *Config) applyDefaults() {
+	if c.Clock == nil {
+		c.Clock = clock.NewReal()
+	}
 }
 
 // BackoffConfig is the exponential-backoff schedule for a failed peer send.

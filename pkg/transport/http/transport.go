@@ -46,9 +46,12 @@ var _ raft.Transport = (*Transport)(nil)
 // or after New; the inbound handler reads the latest registered step under a
 // lock.
 //
-// cfg.Clock MUST be non-nil and PeerURLs non-empty (Config.Validate); a self-URL
-// or empty NodeID is rejected. New returns the validation error verbatim.
+// A nil cfg.Clock defaults to the real clock (parity with raft.Config), so an
+// external caller who cannot construct internal/clock may leave it unset.
+// PeerURLs must be non-empty (Config.Validate); a self-URL or empty NodeID is
+// rejected. New returns the validation error verbatim.
 func New(cfg Config) (*Transport, error) {
+	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
