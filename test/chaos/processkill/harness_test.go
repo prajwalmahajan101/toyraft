@@ -32,19 +32,42 @@ func TestProcessKill(t *testing.T) {
 
 	h := newHarness(t, 5, seed) // N=5 per RESEARCH Open-Q1
 
-	// Wait for an INITIAL leader within a generous boot deadline.
-	lead, ok := h.findLeader(time.Now().Add(5 * time.Second))
-	if !ok {
+	// Wait for an INITIAL leader within a generous boot deadline. The specific
+	// node is not retained: the pre-kill write re-resolves the leader per attempt
+	// (withLeaderRetry) and the leader to kill is re-resolved just before the kill.
+	if _, ok := h.findLeader(time.Now().Add(5 * time.Second)); !ok {
 		t.Fatal("no initial leader within boot deadline")
 	}
 
 	// Pre-kill write (survival setup). Writes go through the leader; the
-	// 307-following client re-sends the body across any redirect churn.
-	if err := h.setKV(lead.clientAddr, "k", "v"); err != nil {
+	// 307-following client re-sends the body across any redirect churn. A brief
+	// initial split election can hand leadership to a short-lived leader that
+	// steps down mid-propose (v1 Propose does not cancel in-flight proposals on
+	// step-down — pkg/raft/node_public.go), so the write is wrapped in a
+	// leader-re-resolving retry rather than pinned to the boot-time leader.
+	writeDeadline := time.Now().Add(5 * time.Second)
+	if err := h.withLeaderRetry(writeDeadline, func(addr string) error { return h.setKV(addr, "k", "v") }); err != nil {
 		t.Fatalf("pre-kill set k=v: %v", err)
 	}
-	if got, err := h.getKV(lead.clientAddr, "k"); err != nil || got != "v" {
-		t.Fatalf("pre-kill get k: got %q err %v, want \"v\" nil", got, err)
+	if err := h.withLeaderRetry(writeDeadline, func(addr string) error {
+		got, err := h.getKV(addr, "k")
+		if err != nil {
+			return err
+		}
+		if got != "v" {
+			return fmt.Errorf("got %q, want %q", got, "v")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("pre-kill get k: %v", err)
+	}
+
+	// Re-resolve the CURRENT leader before the kill: early churn may have left any
+	// earlier leader stale, and CHAOS-02 must kill the ACTUAL leader (killing a
+	// follower would make failover vacuously "succeed").
+	lead, ok := h.findLeader(time.Now().Add(5 * time.Second))
+	if !ok {
+		t.Fatal("no leader to kill after pre-kill write")
 	}
 
 	// Baseline commit_index over the survivors BEFORE the new writes — the max
@@ -64,14 +87,6 @@ func TestProcessKill(t *testing.T) {
 		t.Fatalf("re-elected the killed leader %s (seed=%d)", lead.id, seed)
 	}
 
-	// Write-survival oracle (CHAOS-03): the committed pre-kill value is readable
-	// against the NEW leader (307-follows). This is the survival check, NOT the
-	// commit oracle.
-	got, err := h.getKV(newLead.clientAddr, "k")
-	if err != nil || got != "v" {
-		t.Fatalf("write survival: get k after re-election got %q err %v, want \"v\" nil (seed=%d)", got, err, seed)
-	}
-
 	// Positive commit oracle (>=M) from the COMMIT SEAM. Write M new keys against
 	// the new leader, then poll until a MAJORITY of survivors report
 	// commit_index >= baseline + M. Read-back alone (a 307-followed GET served from
@@ -79,7 +94,8 @@ func TestProcessKill(t *testing.T) {
 	// advance does.
 	const m = 3
 	for i := 0; i < m; i++ {
-		if err := h.setKV(newLead.clientAddr, fmt.Sprintf("k%d", i), fmt.Sprintf("v%d", i)); err != nil {
+		k, v := fmt.Sprintf("k%d", i), fmt.Sprintf("v%d", i)
+		if err := h.withLeaderRetry(time.Now().Add(5*time.Second), func(addr string) error { return h.setKV(addr, k, v) }); err != nil {
 			t.Fatalf("post-election set k%d: %v (seed=%d)", i, err, seed)
 		}
 	}
@@ -89,6 +105,30 @@ func TestProcessKill(t *testing.T) {
 	if !h.majorityCommitAtLeast(baseline+m, majority, oracleDeadline) {
 		t.Fatalf("commit oracle: commit_index did not advance >= %d on a majority (baseline=%d, seed=%d)",
 			m, baseline, seed)
+	}
+
+	// Write-survival oracle (CHAOS-03): the committed pre-kill value is readable
+	// against the NEW leader. This is checked AFTER the post-election writes commit,
+	// not immediately after re-election, because v1 reads are leader-only-reads off
+	// the applied KVSM with no read-index / no leader no-op (.journal/M10.md — a
+	// documented v1 limitation). If the leader is killed in the narrow window after
+	// it committed+applied the pre-kill entry but BEFORE that commit index reached
+	// the followers, every survivor holds the entry in its LOG (durable) yet has not
+	// APPLIED it, and a freshly elected leader cannot serve it until it commits an
+	// entry in its OWN term (Raft §5.4.2 / Figure-8). The post-election writes above
+	// are exactly that current-term commit: they carry the pre-kill entry into the
+	// applied map by Log Matching, making this read deterministic.
+	if err := h.withLeaderRetry(time.Now().Add(5*time.Second), func(addr string) error {
+		got, err := h.getKV(addr, "k")
+		if err != nil {
+			return err
+		}
+		if got != "v" {
+			return fmt.Errorf("got %q, want %q", got, "v")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("write survival: get k after re-election: %v (seed=%d)", err, seed)
 	}
 
 	// History dump (SC4): the on-disk JSON MUST deserialize into

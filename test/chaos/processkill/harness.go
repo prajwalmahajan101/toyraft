@@ -231,6 +231,33 @@ func (h *harness) findLeader(deadline time.Time) (*node, bool) {
 	return nil, false
 }
 
+// withLeaderRetry re-resolves the leader and re-issues fn until it succeeds or the
+// deadline passes. It absorbs the leader-churn window a bare 307-follow cannot:
+// a short-lived leader can accept a write and then step down before the entry
+// commits, so the request hangs until the client timeout (v1 Propose does not
+// actively cancel in-flight proposals on step-down — pkg/raft/node_public.go), or a
+// follower 503s no_leader_known before it learns the new leader. Either surfaces as
+// an error from fn; we re-resolve the (now stale) leader addr and retry. The old
+// leader addr is never reused — findLeader skips killed nodes and returns whoever
+// currently reports role=="leader".
+func (h *harness) withLeaderRetry(deadline time.Time, fn func(clientAddr string) error) error {
+	var last error
+	for time.Now().Before(deadline) {
+		lead, ok := h.findLeader(deadline)
+		if !ok {
+			last = fmt.Errorf("no leader before deadline")
+			break
+		}
+		if err := fn(lead.clientAddr); err == nil {
+			return nil
+		} else {
+			last = err
+		}
+		time.Sleep(pollInterval)
+	}
+	return fmt.Errorf("withLeaderRetry: %w", last)
+}
+
 // killLeaderGroup SIGKILLs the leader's WHOLE process group via the NEGATIVE pgid
 // (never the child-only cmd.Process kill, which signals only the immediate child —
 // RESEARCH Anti-pattern), then reaps the zombie and marks the node killed so teardown and
