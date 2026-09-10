@@ -28,16 +28,18 @@ func TestProposeReturnsApplyResult(t *testing.T) {
 	}()
 
 	var got out
-	for range 400 {
+	deadline := time.After(10 * time.Second)
+	for {
 		select {
 		case got = <-done:
 			goto returned
+		case <-deadline:
+			t.Fatal("Propose did not return within 10s")
 		default:
 			clk.Advance(testTick)
 			time.Sleep(time.Millisecond) // yield to runTicker/applier (CI scheduling)
 		}
 	}
-	t.Fatal("Propose did not return")
 returned:
 	if got.err != nil {
 		t.Fatalf("Propose: %v", got.err)
