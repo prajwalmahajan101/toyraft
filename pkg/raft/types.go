@@ -118,6 +118,21 @@ type Message struct {
 	//              follower's lastIndex+1 if its log is too short
 }
 
+// Snapshot is a durable point-in-time checkpoint of the StateMachine's
+// applied state (ADR-0024). Data is the opaque blob produced by
+// StateMachine.Snapshot; Index/Term identify the last log entry the blob
+// includes. It is the durable applied floor: on restart the node calls
+// StateMachine.Restore(Data) and resumes Apply from Index+1, so committed
+// entries at or below Index are never re-applied.
+//
+// The zero value (Index 0, nil Data) means "no snapshot yet" — the value
+// LoadSnapshot returns on a fresh store.
+type Snapshot struct {
+	Index Index
+	Term  Term
+	Data  []byte
+}
+
 // HardState is the durably-persisted slice of Raft state.
 //
 // Invariants:

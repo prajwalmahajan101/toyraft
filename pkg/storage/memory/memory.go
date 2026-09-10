@@ -23,6 +23,7 @@ type Storage struct {
 	mu      sync.RWMutex
 	entries []raft.Entry // entries[i].Index == raft.Index(i+1)
 	hs      raft.HardState
+	snap    raft.Snapshot // durable applied checkpoint (ADR-0024); zero == none
 }
 
 // Compile-time interface assertion. Catches drift if storage.Storage grows.
@@ -186,4 +187,33 @@ func (m *Storage) Snapshot() ([]byte, raft.Index, error) {
 // Global Invariant 5. v2 will populate without changing the signature.
 func (m *Storage) Restore(data []byte) error {
 	return storage.ErrSnapshotUnsupported
+}
+
+// SaveSnapshot persists a StateMachine checkpoint (ADR-0024). In-RAM impl:
+// value-copy assignment with a deep copy of Data so the caller may reuse the
+// blob after the call returns.
+func (m *Storage) SaveSnapshot(snap raft.Snapshot) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(snap.Data) > 0 {
+		data := make([]byte, len(snap.Data))
+		copy(data, snap.Data)
+		snap.Data = data
+	}
+	m.snap = snap
+	return nil
+}
+
+// LoadSnapshot returns the most recently saved Snapshot, or the zero value on
+// a fresh store (ADR-0024) — NEVER an error. Data is deep-copied so the caller
+// may mutate it without corrupting the store.
+func (m *Storage) LoadSnapshot() (raft.Snapshot, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := m.snap
+	if len(m.snap.Data) > 0 {
+		out.Data = make([]byte, len(m.snap.Data))
+		copy(out.Data, m.snap.Data)
+	}
+	return out, nil
 }

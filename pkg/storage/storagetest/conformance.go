@@ -33,6 +33,10 @@ type Factory func(t *testing.T) storage.Storage
 //   - HardStateFreshIsZero        — LoadHardState on fresh store returns (zero, nil)
 //   - SnapshotStub                — Snapshot returns (nil, 0, ErrSnapshotUnsupported)
 //   - RestoreStub                 — Restore returns ErrSnapshotUnsupported
+//   - SnapshotFreshIsZero         — LoadSnapshot on fresh store returns (zero, nil)
+//   - SnapshotRoundtrip           — SaveSnapshot/LoadSnapshot preserve all fields
+//   - SnapshotOverwrite           — a second SaveSnapshot replaces the prior one
+//   - SnapshotCallerCanMutate     — mutating SaveSnapshot input after return does not corrupt store
 //   - EntriesCallerCanMutate      — mutating Entries' return does not corrupt store
 //   - AppendCallerCanMutate       — mutating Append's input after return does not corrupt store
 func RunConformance(t *testing.T, f Factory) {
@@ -276,6 +280,66 @@ func RunConformance(t *testing.T, f Factory) {
 		err := s.Restore([]byte("anything"))
 		if !errors.Is(err, storage.ErrSnapshotUnsupported) {
 			t.Errorf("Restore err = %v, want errors.Is(storage.ErrSnapshotUnsupported)", err)
+		}
+	})
+
+	t.Run("SnapshotFreshIsZero", func(t *testing.T) {
+		s := f(t)
+		got, err := s.LoadSnapshot()
+		if err != nil {
+			t.Errorf("LoadSnapshot on fresh store: err = %v, want nil", err)
+		}
+		if got.Index != 0 || got.Term != 0 || got.Data != nil {
+			t.Errorf("LoadSnapshot on fresh store = %+v, want zero value", got)
+		}
+	})
+
+	t.Run("SnapshotRoundtrip", func(t *testing.T) {
+		s := f(t)
+		snap := raft.Snapshot{Index: 9, Term: 3, Data: []byte("checkpoint-blob")}
+		if err := s.SaveSnapshot(snap); err != nil {
+			t.Fatalf("SaveSnapshot: %v", err)
+		}
+		got, err := s.LoadSnapshot()
+		if err != nil {
+			t.Fatalf("LoadSnapshot: %v", err)
+		}
+		if got.Index != snap.Index || got.Term != snap.Term || !bytes.Equal(got.Data, snap.Data) {
+			t.Errorf("LoadSnapshot = %+v, want %+v", got, snap)
+		}
+	})
+
+	t.Run("SnapshotOverwrite", func(t *testing.T) {
+		s := f(t)
+		if err := s.SaveSnapshot(raft.Snapshot{Index: 4, Term: 1, Data: []byte("old")}); err != nil {
+			t.Fatalf("SaveSnapshot(old): %v", err)
+		}
+		newer := raft.Snapshot{Index: 12, Term: 5, Data: []byte("new")}
+		if err := s.SaveSnapshot(newer); err != nil {
+			t.Fatalf("SaveSnapshot(new): %v", err)
+		}
+		got, err := s.LoadSnapshot()
+		if err != nil {
+			t.Fatalf("LoadSnapshot: %v", err)
+		}
+		if got.Index != newer.Index || got.Term != newer.Term || !bytes.Equal(got.Data, newer.Data) {
+			t.Errorf("LoadSnapshot after overwrite = %+v, want %+v", got, newer)
+		}
+	})
+
+	t.Run("SnapshotCallerCanMutate", func(t *testing.T) {
+		s := f(t)
+		blob := []byte("mutable")
+		if err := s.SaveSnapshot(raft.Snapshot{Index: 1, Term: 1, Data: blob}); err != nil {
+			t.Fatalf("SaveSnapshot: %v", err)
+		}
+		blob[0] = 'X' // caller mutates the input AFTER SaveSnapshot returned
+		got, err := s.LoadSnapshot()
+		if err != nil {
+			t.Fatalf("LoadSnapshot: %v", err)
+		}
+		if !bytes.Equal(got.Data, []byte("mutable")) {
+			t.Errorf("after caller mutated SaveSnapshot input, store Data = %q, want %q", got.Data, "mutable")
 		}
 	})
 

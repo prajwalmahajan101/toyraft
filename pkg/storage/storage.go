@@ -123,4 +123,26 @@ type StateStorage interface {
 	//
 	// v1: implementors MUST return ErrSnapshotUnsupported.
 	Restore(data []byte) error
+
+	// SaveSnapshot durably persists a StateMachine checkpoint (ADR-0024).
+	// This is the WORKING durable-snapshot path — distinct from the frozen
+	// Snapshot()/Restore() stubs above, which stay ErrSnapshotUnsupported for
+	// STOR-01 forward-compat.
+	//
+	// Invariants:
+	//   - MUST be atomic and durable: a crash mid-call leaves either the prior
+	//     or the new snapshot fully on disk, never a torn write.
+	//   - Implementations SHOULD use the tmp+rename pattern on Unix.
+	//
+	// Error contract:
+	//   - Wraps the underlying I/O error with %w.
+	SaveSnapshot(snap raft.Snapshot) error
+
+	// LoadSnapshot returns the most recently persisted Snapshot, or the zero
+	// value if none has ever been saved (fresh store).
+	//
+	// Error contract:
+	//   - A missing snapshot is NOT an error; returns (raft.Snapshot{}, nil).
+	//   - A corrupt snapshot IS an error; wraps the parse error with %w.
+	LoadSnapshot() (raft.Snapshot, error)
 }

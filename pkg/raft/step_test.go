@@ -25,6 +25,8 @@ func (fakeStorage) SaveHardState(HardState) error         { return nil }
 func (fakeStorage) LoadHardState() (HardState, error)     { return HardState{}, nil }
 func (fakeStorage) Snapshot() ([]byte, Index, error)      { return nil, 0, ErrSnapshotUnsupported }
 func (fakeStorage) Restore([]byte) error                  { return ErrSnapshotUnsupported }
+func (fakeStorage) SaveSnapshot(Snapshot) error           { return nil }
+func (fakeStorage) LoadSnapshot() (Snapshot, error)       { return Snapshot{}, nil }
 
 // nopTransport / nopSM are minimal in-test doubles so Config.Validate's
 // nil-Transport / nil-StateMachine rules (R-2) pass. They do nothing; the

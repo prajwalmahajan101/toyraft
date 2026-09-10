@@ -37,6 +37,7 @@ type memStorage struct {
 	mu      sync.Mutex
 	entries []Entry
 	hs      HardState
+	snap    Snapshot // durable applied checkpoint (ADR-0024); zero == none
 }
 
 func (m *memStorage) Append(es []Entry) error {
@@ -105,6 +106,19 @@ func (m *memStorage) LoadHardState() (HardState, error) {
 
 func (m *memStorage) Snapshot() ([]byte, Index, error) { return nil, 0, ErrSnapshotUnsupported }
 func (m *memStorage) Restore([]byte) error             { return ErrSnapshotUnsupported }
+
+func (m *memStorage) SaveSnapshot(snap Snapshot) error {
+	m.mu.Lock()
+	m.snap = snap
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *memStorage) LoadSnapshot() (Snapshot, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.snap, nil
+}
 
 // recordingSM records every applied entry under a mutex so tests can assert
 // apply order + apply-before-Propose-returns. An optional applyDelay simulates
