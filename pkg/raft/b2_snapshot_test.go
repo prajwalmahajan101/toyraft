@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/prajwalmahajan101/toyraft/internal/clock"
 )
@@ -98,6 +99,10 @@ func proposeAndWait(t *testing.T, n Node, clk *clock.Fake, data string) Index {
 		idx, _, _, err := n.Propose(context.Background(), []byte(data))
 		done <- res{idx, err}
 	}()
+	// Advance one tick at a time, yielding after each so the async
+	// runTicker/applier goroutines can drain commit->apply and signal the
+	// waiter (mirrors advanceUntil's scheduling hint — a tight advance loop
+	// starves those goroutines on a busy CI runner).
 	for range 400 {
 		select {
 		case r := <-done:
@@ -107,6 +112,7 @@ func proposeAndWait(t *testing.T, n Node, clk *clock.Fake, data string) Index {
 			return r.idx
 		default:
 			clk.Advance(testTick)
+			time.Sleep(time.Millisecond)
 		}
 	}
 	t.Fatalf("Propose(%q) did not return", data)

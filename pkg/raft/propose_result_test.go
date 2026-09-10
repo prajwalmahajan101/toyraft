@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"testing"
+	"time"
 )
 
 // TestProposeReturnsApplyResult proves Friction-3: Propose surfaces the opaque
@@ -33,6 +34,7 @@ func TestProposeReturnsApplyResult(t *testing.T) {
 			goto returned
 		default:
 			clk.Advance(testTick)
+			time.Sleep(time.Millisecond) // yield to runTicker/applier (CI scheduling)
 		}
 	}
 	t.Fatal("Propose did not return")
