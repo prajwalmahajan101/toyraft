@@ -30,6 +30,72 @@ func delOp(t *testing.T, key string) raft.Entry {
 	return raft.Entry{Data: data}
 }
 
+// TestSnapshotRestoreRoundtrip proves a fresh KV rebuilt via Restore(Snapshot())
+// matches the original map and applied index (ADR-0024) — the path that lets an
+// in-memory StateMachine survive a restart without replaying the whole log.
+func TestSnapshotRestoreRoundtrip(t *testing.T) {
+	src := kvsm.New()
+	e1 := setOp(t, "a", []byte("1"))
+	e1.Index = 1
+	e2 := setOp(t, "b", []byte("2"))
+	e2.Index = 2
+	e3 := delOp(t, "a")
+	e3.Index = 3
+	for _, e := range []raft.Entry{e1, e2, e3} {
+		if _, err := src.Apply(e); err != nil {
+			t.Fatalf("Apply(%d): %v", e.Index, err)
+		}
+	}
+
+	blob, idx, err := src.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if idx != 3 {
+		t.Fatalf("Snapshot lastIndex = %d, want 3", idx)
+	}
+
+	dst := kvsm.New()
+	if err := dst.Restore(blob); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	// "a" was deleted, "b" survives.
+	if _, ok := dst.Get("a"); ok {
+		t.Errorf("restored KV has key a; want deleted")
+	}
+	if v, ok := dst.Get("b"); !ok || !bytes.Equal(v, []byte("2")) {
+		t.Errorf("restored KV Get(b) = (%q,%v), want (\"2\",true)", v, ok)
+	}
+	// A subsequent apply continues from the restored index.
+	e4 := setOp(t, "c", []byte("3"))
+	e4.Index = 4
+	if _, err := dst.Apply(e4); err != nil {
+		t.Fatalf("Apply after restore: %v", err)
+	}
+	if _, gotIdx, _ := dst.Snapshot(); gotIdx != 4 {
+		t.Errorf("lastIndex after post-restore apply = %d, want 4", gotIdx)
+	}
+}
+
+// TestRestoreEmptyResets proves Restore(nil) yields the empty state.
+func TestRestoreEmptyResets(t *testing.T) {
+	k := kvsm.New()
+	e := setOp(t, "x", []byte("y"))
+	e.Index = 1
+	if _, err := k.Apply(e); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if err := k.Restore(nil); err != nil {
+		t.Fatalf("Restore(nil): %v", err)
+	}
+	if _, ok := k.Get("x"); ok {
+		t.Errorf("after Restore(nil), key x still present")
+	}
+	if _, idx, _ := k.Snapshot(); idx != 0 {
+		t.Errorf("after Restore(nil), lastIndex = %d, want 0", idx)
+	}
+}
+
 func TestApplySetGetDelete(t *testing.T) {
 	k := kvsm.New()
 

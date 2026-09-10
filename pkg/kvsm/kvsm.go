@@ -22,14 +22,27 @@ type Op struct {
 // KV is the reference key/value StateMachine: a mutex-guarded
 // map[string][]byte. It satisfies raft.StateMachine (Apply/Snapshot/Restore)
 // and additionally exposes Get for the leader-only-read path.
+//
+// lastIndex tracks the Index of the most recently applied entry. Snapshot
+// returns it so the node can record the durable applied floor, and Restore
+// re-establishes it so an in-memory KV survives a restart via the snapshot
+// (ADR-0024) rather than depending on a full log replay.
 type KV struct {
-	mu sync.RWMutex
-	m  map[string][]byte
+	mu        sync.RWMutex
+	m         map[string][]byte
+	lastIndex raft.Index
 }
 
 // New returns an empty KV ready for Apply and Get.
 func New() *KV {
 	return &KV{m: make(map[string][]byte)}
+}
+
+// kvSnapshot is the JSON envelope KV serialises in Snapshot / parses in
+// Restore. It carries the full map plus the applied index the map reflects.
+type kvSnapshot struct {
+	M         map[string][]byte `json:"m"`
+	LastIndex raft.Index        `json:"last_index"`
 }
 
 // Apply decodes the Op envelope in entry.Data and mutates the map
@@ -52,6 +65,7 @@ func (k *KV) Apply(entry raft.Entry) (any, error) {
 
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	k.lastIndex = entry.Index // track the applied floor for Snapshot (ADR-0024)
 
 	switch op.Kind {
 	case "set":
@@ -76,14 +90,40 @@ func (k *KV) Get(key string) ([]byte, bool) {
 	return v, ok
 }
 
-// Snapshot is a v1 stub; snapshotting is unsupported (STOR-01 forward-compat).
+// Snapshot serialises the full map plus the applied index as JSON (ADR-0024).
+// The driver persists the blob + returned index via Storage.SaveSnapshot; on
+// restart Restore rebuilds the map and the node resumes Apply from index+1, so
+// an in-memory KV survives a restart without replaying the whole log.
 func (k *KV) Snapshot() ([]byte, raft.Index, error) {
-	return nil, 0, raft.ErrSnapshotUnsupported
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	blob, err := json.Marshal(kvSnapshot{M: k.m, LastIndex: k.lastIndex})
+	if err != nil {
+		return nil, 0, fmt.Errorf("kvsm: marshal snapshot: %w", err)
+	}
+	return blob, k.lastIndex, nil
 }
 
-// Restore is a v1 stub; snapshotting is unsupported (STOR-01 forward-compat).
-func (k *KV) Restore([]byte) error {
-	return raft.ErrSnapshotUnsupported
+// Restore replaces the map and applied index from a blob produced by Snapshot
+// (ADR-0024). An empty blob resets to the empty state (index 0).
+func (k *KV) Restore(data []byte) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if len(data) == 0 {
+		k.m = make(map[string][]byte)
+		k.lastIndex = 0
+		return nil
+	}
+	var snap kvSnapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		return fmt.Errorf("kvsm: unmarshal snapshot: %w", err)
+	}
+	if snap.M == nil {
+		snap.M = make(map[string][]byte)
+	}
+	k.m = snap.M
+	k.lastIndex = snap.LastIndex
+	return nil
 }
 
 // Compile-time assertion that *KV satisfies the frozen StateMachine interface.
