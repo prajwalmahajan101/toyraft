@@ -196,7 +196,7 @@ func TestSilentDefault(t *testing.T) {
 	}
 	// Exercise the paths that WOULD log on a non-discard handler.
 	_ = node.Step(context.Background(), Message{Type: MsgTick})
-	_, _, _ = node.Propose(context.Background(), []byte("x"))
+	_, _, _, _ = node.Propose(context.Background(), []byte("x"))
 	if err := node.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}

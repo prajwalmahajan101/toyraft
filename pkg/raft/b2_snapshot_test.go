@@ -95,7 +95,7 @@ func proposeAndWait(t *testing.T, n Node, clk *clock.Fake, data string) Index {
 	}
 	done := make(chan res, 1)
 	go func() {
-		idx, _, err := n.Propose(context.Background(), []byte(data))
+		idx, _, _, err := n.Propose(context.Background(), []byte(data))
 		done <- res{idx, err}
 	}()
 	for range 400 {

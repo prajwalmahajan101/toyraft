@@ -640,7 +640,7 @@ func (c *Cluster) ProposeIntoForTest(id raft.NodeID, op []byte) (raft.Index, boo
 	go func() {
 		// ctx bound to the cluster: a never-applied proposal (isolated leader)
 		// is unblocked when Close cancels c.ctx — never leaks past the test.
-		_, _, perr := a.node.Propose(c.ctx, op)
+		_, _, _, perr := a.node.Propose(c.ctx, op)
 		if perr != nil {
 			mu.Lock()
 			// A clean ErrNotLeader / ErrProposalDropped means the local append

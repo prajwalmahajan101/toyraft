@@ -22,7 +22,7 @@ const maxValueBytes = 1 << 20 // 1 MiB
 type raftNode interface {
 	Status() raft.Status
 	LeaderHint() raft.NodeID
-	Propose(ctx context.Context, data []byte) (raft.Index, raft.Term, error)
+	Propose(ctx context.Context, data []byte) (raft.Index, raft.Term, any, error)
 }
 
 // roleName maps the frozen raft.Role uint8 to the LOCKED lowercase wire string.
@@ -115,7 +115,7 @@ func (h *kvHandler) propose(w http.ResponseWriter, r *http.Request, op kvsm.Op) 
 		_, _ = w.Write([]byte(`{"error":"marshal_op"}`))
 		return
 	}
-	if _, _, err := h.node.Propose(r.Context(), data); err != nil {
+	if _, _, _, err := h.node.Propose(r.Context(), data); err != nil {
 		var notLeader *raft.ErrNotLeader
 		if errors.As(err, &notLeader) {
 			hint := notLeader.LeaderHint
