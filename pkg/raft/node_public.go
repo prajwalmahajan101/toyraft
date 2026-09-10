@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"sync"
@@ -115,6 +116,12 @@ type nodeImpl struct {
 	// ApplyIndex as the last APPLIED index), never the enqueue frontier.
 	appliedIdx atomic.Uint64
 
+	// snapshotIdx is the highest index captured by a durable checkpoint
+	// (ADR-0024). Seeded from the loaded snapshot in New and advanced by the
+	// applier after each successful SaveSnapshot. The periodic-checkpoint
+	// cadence compares appliedIdx against it.
+	snapshotIdx atomic.Uint64
+
 	waiters sync.Map              // map[Index]chan proposeResult; 07-03 registers/resolves
 	fatal   atomic.Pointer[error] // set on Apply panic (API-06); 07-03
 	stopped atomic.Bool           // true after Stop; Propose/Step guard
@@ -130,6 +137,12 @@ type proposeResult struct {
 // defaultApplyBuf is the bounded apply-channel capacity (RESEARCH Open-Q 4;
 // API-05 — the apply channel is NEVER unbounded).
 const defaultApplyBuf = 256
+
+// defaultSnapshotInterval is the default number of applied entries between
+// durable StateMachine checkpoints when Config.SnapshotInterval is unset
+// (ADR-0024). A durability/throughput knob, not a correctness bound — Stop
+// always takes a final checkpoint regardless.
+const defaultSnapshotInterval Index = 1024
 
 // applyBuf returns the bounded apply-channel capacity for cfg. Centralised so
 // 07-03 (and any future tuning knob) has a single source of truth; today it is
@@ -157,11 +170,30 @@ func New(cfg Config) (Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &nodeImpl{
+	n := &nodeImpl{
 		core:    core,
 		cfg:     &cfg,
 		applyCh: make(chan Entry, applyBuf(&cfg)),
-	}, nil
+	}
+	// Load the durable applied checkpoint and restore the StateMachine to it
+	// (B2 / ADR-0024). Seeding enqueuedIdx=appliedIdx=snap.Index makes the
+	// driver's commit->apply drain resume from snap.Index+1, so entries already
+	// captured by the snapshot are never re-applied on restart. A StateMachine
+	// that opts out of snapshots (Restore returns ErrSnapshotUnsupported) falls
+	// back to full-log replay from index 0.
+	snap, err := cfg.Storage.LoadSnapshot()
+	if err != nil {
+		return nil, fmt.Errorf("raft: load snapshot: %w", err)
+	}
+	if snap.Index > 0 {
+		if err := cfg.StateMachine.Restore(snap.Data); err != nil && !errors.Is(err, ErrSnapshotUnsupported) {
+			return nil, fmt.Errorf("raft: restore snapshot at index %d: %w", snap.Index, err)
+		}
+		n.enqueuedIdx.Store(uint64(snap.Index))
+		n.appliedIdx.Store(uint64(snap.Index))
+		n.snapshotIdx.Store(uint64(snap.Index))
+	}
+	return n, nil
 }
 
 // Status returns a self-consistent snapshot of the node's observable state.
@@ -319,6 +351,11 @@ func (n *nodeImpl) Stop() error {
 		}()
 		select {
 		case <-done:
+			// Goroutines joined cleanly: take a final durable checkpoint so a
+			// subsequent clean restart resumes from the last applied index and
+			// replays nothing (B2 / ADR-0024). Skipped on timeout — a wedged
+			// applier means appliedIdx may be mid-flight.
+			n.checkpoint()
 		case <-time.After(n.cfg.StopTimeout): // default 5s (API-08)
 			n.stopErr = fmt.Errorf("raft: Stop timed out after %s", n.cfg.StopTimeout)
 		}
