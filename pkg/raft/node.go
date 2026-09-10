@@ -154,6 +154,17 @@ func newNode(cfg *Config) (*node, error) {
 	n.currentTerm = hs.CurrentTerm
 	n.votedFor = hs.VotedFor
 	n.commitIndex = hs.Commit
+	// Restore the in-memory Log from Storage BEFORE accepting Step events
+	// (B1 / ADR-0024). newNode otherwise starts with an empty &Log{}, so a
+	// restarted node's LastIndex() reads 0 while commitIndex is recovered —
+	// the next Propose would then append at index 1 over the persisted
+	// 1..LastIndex(), the Storage.Append contiguity check would fail, and the
+	// leader could no longer accept writes. Populating n.log from the durable
+	// entries makes LastIndex() reflect the persisted log so a restarted
+	// leader appends at the correct next index.
+	if err := n.restoreLogFromStorage(); err != nil {
+		return nil, err
+	}
 	n.rng = newNodeRNG(cfg.Seed, cfg.NodeID, cfg.Clock)
 	// resetElectionTimeoutLocked lives in follower.go; Go allows
 	// forward references within a package.
@@ -165,6 +176,31 @@ func newNode(cfg *Config) (*node, error) {
 	n.wireElectionTriggerLocked()
 	n.started = true
 	return n, nil
+}
+
+// restoreLogFromStorage repopulates the in-memory Log from the durable
+// Storage on construction (B1 / ADR-0024). It reads [FirstIndex, LastIndex]
+// and appends the entries in order. An empty log (LastIndex()==0) is a no-op.
+// Called before started=true, so no concurrent Step can observe a half-filled
+// log. Errors wrap the underlying Storage error with %w.
+func (n *node) restoreLogFromStorage() error {
+	last, err := n.storage.LastIndex()
+	if err != nil {
+		return fmt.Errorf("raft: restore log last index: %w", err)
+	}
+	if last == 0 {
+		return nil // fresh store: nothing to restore
+	}
+	first, err := n.storage.FirstIndex()
+	if err != nil {
+		return fmt.Errorf("raft: restore log first index: %w", err)
+	}
+	ents, err := n.storage.Entries(first, last+1) // half-open [first, last+1)
+	if err != nil {
+		return fmt.Errorf("raft: restore log entries [%d,%d): %w", first, last+1, err)
+	}
+	n.log.Append(ents...)
+	return nil
 }
 
 // Step is the single inbound event point for the state machine. It is
