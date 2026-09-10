@@ -101,22 +101,25 @@ func proposeAndWait(t *testing.T, n Node, clk *clock.Fake, data string) Index {
 	}()
 	// Advance one tick at a time, yielding after each so the async
 	// runTicker/applier goroutines can drain commit->apply and signal the
-	// waiter (mirrors advanceUntil's scheduling hint — a tight advance loop
-	// starves those goroutines on a busy CI runner).
-	for range 400 {
+	// waiter. Bounded by a WALL-CLOCK deadline, not an iteration count: under
+	// -race on a slow shared runner the commit->apply pipeline can take
+	// seconds, and a fixed iteration cap starves out early (mirrors the proven
+	// TestProposeBlocksUntilApplied loop).
+	deadline := time.After(10 * time.Second)
+	for {
 		select {
 		case r := <-done:
 			if r.err != nil {
 				t.Fatalf("Propose(%q): %v", data, r.err)
 			}
 			return r.idx
+		case <-deadline:
+			t.Fatalf("Propose(%q) did not return within 10s", data)
 		default:
 			clk.Advance(testTick)
 			time.Sleep(time.Millisecond)
 		}
 	}
-	t.Fatalf("Propose(%q) did not return", data)
-	return 0
 }
 
 // TestSnapshotResumeNoDoubleApply is the B2 gating regression test (ADR-0024).
