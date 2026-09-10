@@ -2,7 +2,6 @@ package inproc
 
 import (
 	"context"
-	"errors"
 	"sort"
 	"sync"
 	"time"
@@ -63,9 +62,10 @@ type Endpoint struct {
 // goroutine is started before return; the caller must Close to release
 // it.
 func NewHub(cfg HubConfig) (*Hub, error) {
-	if cfg.Clock == nil {
-		return nil, errors.New("inproc: HubConfig.Clock required")
-	}
+	// A nil Clock defaults to the real clock (ADR-0023 parity) so external
+	// embedders — who cannot construct internal/clock — can build a Hub with a
+	// zero-value HubConfig. In-module tests inject a *clock.Fake for determinism.
+	cfg.applyDefaults()
 	if cfg.InboundCap == 0 {
 		cfg.InboundCap = defaultInboundCap
 	}
