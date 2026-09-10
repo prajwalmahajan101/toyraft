@@ -84,7 +84,7 @@ func TestApplyPanic(t *testing.T) {
 	// the apply error (the applier signals the waiter on the panic path).
 	done := make(chan error, 1)
 	go func() {
-		_, _, e := n.Propose(context.Background(), []byte("first"))
+		_, _, _, e := n.Propose(context.Background(), []byte("first"))
 		done <- e
 	}()
 	deadline := time.After(5 * time.Second)
@@ -131,7 +131,7 @@ firstDone:
 	// (d) the applier KEEPS DRAINING: a SECOND entry (index 2, no panic) applies.
 	done2 := make(chan error, 1)
 	go func() {
-		_, _, e := n.Propose(context.Background(), []byte("second"))
+		_, _, _, e := n.Propose(context.Background(), []byte("second"))
 		done2 <- e
 	}()
 	deadline = time.After(5 * time.Second)

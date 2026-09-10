@@ -28,11 +28,11 @@ func (s stubNode) Status() raft.Status {
 
 func (s stubNode) LeaderHint() raft.NodeID { return s.hint }
 
-func (s stubNode) Propose(_ context.Context, _ []byte) (raft.Index, raft.Term, error) {
+func (s stubNode) Propose(_ context.Context, _ []byte) (raft.Index, raft.Term, any, error) {
 	if s.proposeErr != nil {
-		return 0, 0, s.proposeErr
+		return 0, 0, nil, s.proposeErr
 	}
-	return 1, 1, nil
+	return 1, 1, nil, nil
 }
 
 // clientBook is the redirect address book used across the tests.

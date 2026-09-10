@@ -48,8 +48,13 @@ type Node interface {
 	// committed AND applied (Apply has been called on this node's StateMachine),
 	// or the context expires, or leadership is lost.
 	//
+	// The fourth return value is the opaque result StateMachine.Apply returned
+	// for this entry (e.g. an assigned ID), so an embedder can recover a value
+	// computed in Apply without an out-of-band registry. It is nil on any error
+	// path and whenever Apply returned a nil result.
+	//
 	// Invariants:
-	//   - Returns (index, term, nil) only after the command has been applied.
+	//   - Returns (index, term, result, nil) only after the command has been applied.
 	//   - On leader loss before commit, returns ErrProposalDropped.
 	//   - On follower/candidate role, returns ErrNotLeader with LeaderHint set.
 	//
@@ -58,7 +63,7 @@ type Node interface {
 	//   - ErrProposalDropped — safe to retry.
 	//   - ErrStopped — node is shut down; do not retry on this Node.
 	//   - ctx.Err() — caller's deadline; the entry MAY still commit later.
-	Propose(ctx context.Context, data []byte) (Index, Term, error)
+	Propose(ctx context.Context, data []byte) (Index, Term, any, error)
 
 	// Step is the inbound RPC entry point. Transport implementations call
 	// Step for every Message received from a peer.
@@ -277,31 +282,31 @@ func (n *nodeImpl) Step(ctx context.Context, msg Message) error {
 // LoadAndDelete in applyOne, the ctx path via Delete here. The cap-1 buffer on
 // the result channel means a late applier send AFTER a ctx-timeout return never
 // blocks (the value is dropped with the GC'd channel).
-func (n *nodeImpl) Propose(ctx context.Context, data []byte) (Index, Term, error) {
+func (n *nodeImpl) Propose(ctx context.Context, data []byte) (Index, Term, any, error) {
 	if n.stopped.Load() {
-		return 0, 0, ErrStopped
+		return 0, 0, nil, ErrStopped
 	}
 	n.core.mu.Lock()
 	if n.core.role != Leader {
 		hint := n.core.leaderHint
 		n.core.mu.Unlock()
-		return 0, 0, &ErrNotLeader{LeaderHint: hint} // API-04
+		return 0, 0, nil, &ErrNotLeader{LeaderHint: hint} // API-04
 	}
 	idx, ok := n.core.proposeLocked(data)
 	term := n.core.currentTerm
 	n.core.mu.Unlock()
 	if !ok {
-		return 0, 0, ErrProposalDropped
+		return 0, 0, nil, ErrProposalDropped
 	}
 
 	ch := make(chan proposeResult, 1) // cap 1: applier's send never blocks (Pitfall 5)
 	n.waiters.Store(idx, ch)
 	select {
 	case r := <-ch: // APPLIED (not just committed) — SC3
-		return idx, term, r.err
+		return idx, term, r.res, r.err
 	case <-ctx.Done(): // API-09; entry MAY still commit later (LLD §3)
 		n.waiters.Delete(idx)
-		return 0, 0, ctx.Err()
+		return 0, 0, nil, ctx.Err()
 	}
 }
 

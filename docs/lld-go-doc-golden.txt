@@ -357,8 +357,13 @@ type Node interface {
 	// committed AND applied (Apply has been called on this node's StateMachine),
 	// or the context expires, or leadership is lost.
 	//
+	// The fourth return value is the opaque result StateMachine.Apply returned
+	// for this entry (e.g. an assigned ID), so an embedder can recover a value
+	// computed in Apply without an out-of-band registry. It is nil on any error
+	// path and whenever Apply returned a nil result.
+	//
 	// Invariants:
-	//   - Returns (index, term, nil) only after the command has been applied.
+	//   - Returns (index, term, result, nil) only after the command has been applied.
 	//   - On leader loss before commit, returns ErrProposalDropped.
 	//   - On follower/candidate role, returns ErrNotLeader with LeaderHint set.
 	//
@@ -367,7 +372,7 @@ type Node interface {
 	//   - ErrProposalDropped — safe to retry.
 	//   - ErrStopped — node is shut down; do not retry on this Node.
 	//   - ctx.Err() — caller's deadline; the entry MAY still commit later.
-	Propose(ctx context.Context, data []byte) (Index, Term, error)
+	Propose(ctx context.Context, data []byte) (Index, Term, any, error)
 
 	// Step is the inbound RPC entry point. Transport implementations call
 	// Step for every Message received from a peer.

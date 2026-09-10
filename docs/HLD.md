@@ -27,7 +27,7 @@ ToyRaft decomposes along a strict **core / plug-in / driver** axis. The **core**
 | `StateMachine` | plug-in (consumer-owned) | Apply committed entries; optionally Snapshot/Restore. The KV in the demo lives here. | called from Node's apply goroutine |
 | `Storage` | plug-in | `LogStorage` (append/truncate/range/lastIndex) + `StateStorage` (save/load `HardState`). Two impls: in-memory and file-backed (append-only). | 0 |
 | `RPCs` | core types | `RequestVote{Req,Resp}`, `AppendEntries{Req,Resp}`. v1: no `InstallSnapshot`. | — |
-| `Propose` API | driver | `node.Propose(ctx, []byte) (index, term, error)` — leader-only entry point for clients. Returns when entry is committed & applied, or error if leadership lost. | — |
+| `Propose` API | driver | `node.Propose(ctx, []byte) (index, term, result, error)` — leader-only entry point for clients. Returns when entry is committed & applied (result is Apply's return value), or error if leadership lost. | — |
 | HTTP node-RPC server | demo | Exposes `/raft/message` for the HTTP transport, plus demo-only `/kv/*`. | 1 |
 | `cmd/toyraft-demo` | driver app | Wires N nodes with HTTP transport + file storage + KV state machine. | — |
 | `cmd/toyraft-ctl` | driver app | Client CLI: `put`, `get`, `status`, `leader`, `stepdown` against the demo's HTTP. | — |

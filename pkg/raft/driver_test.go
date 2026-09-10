@@ -227,7 +227,7 @@ func TestProposeBlocksUntilApplied(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		idx, term, err := n.Propose(context.Background(), []byte("x"))
+		idx, term, _, err := n.Propose(context.Background(), []byte("x"))
 		done <- result{idx, term, err}
 	}()
 
@@ -278,7 +278,7 @@ func TestProposeNotLeader(t *testing.T) {
 	if n.Status().Role != Follower {
 		t.Fatalf("precondition: role = %v, want Follower", n.Status().Role)
 	}
-	_, _, err := n.Propose(context.Background(), []byte("x"))
+	_, _, _, err := n.Propose(context.Background(), []byte("x"))
 	var nl *ErrNotLeader
 	if !errors.As(err, &nl) {
 		t.Fatalf("Propose on follower: err = %v, want *ErrNotLeader", err)
@@ -297,7 +297,7 @@ func TestProposeCtxCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel BEFORE proposing so the select takes the ctx.Done branch
-	_, _, err := n.Propose(ctx, []byte("y"))
+	_, _, _, err := n.Propose(ctx, []byte("y"))
 	if err != context.Canceled {
 		t.Fatalf("Propose(cancelled ctx): err = %v, want context.Canceled", err)
 	}
@@ -306,7 +306,7 @@ func TestProposeCtxCancel(t *testing.T) {
 	// deleted — Pitfall 5): drive it to applied with a healthy ctx.
 	done := make(chan error, 1)
 	go func() {
-		_, _, e := n.Propose(context.Background(), []byte("z"))
+		_, _, _, e := n.Propose(context.Background(), []byte("z"))
 		done <- e
 	}()
 	deadline := time.After(5 * time.Second)
