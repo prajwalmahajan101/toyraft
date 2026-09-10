@@ -77,12 +77,15 @@ func (c Config) Validate() error {
 	if c.Clock == nil {
 		return fmt.Errorf("http.Config: Clock must be non-nil (use internal/clock.Real); the transport reads the wall clock only via Clock")
 	}
-	if len(c.PeerURLs) == 0 {
-		return fmt.Errorf("http.Config: PeerURLs must be non-empty (the transport cannot resolve any peer address)")
-	}
+	// An EMPTY PeerURLs is valid: it is the single-node self-only cluster
+	// (raft.Config.Peers == [self]), which has no peer to dial (friction-5).
+	// A multi-node cluster still needs entries, but the transport cannot know N
+	// here — Send to an unresolved peer logs-and-drops (WIRE §1), so an empty
+	// map degrades safely rather than being rejected outright.
 	if _, self := c.PeerURLs[c.NodeID]; self {
 		// A self-URL is harmless but almost always a config mistake: the node
-		// never Sends to itself. Flag it so operators catch a copy-paste error.
+		// never Sends to itself. Flag it (only reachable when PeerURLs is
+		// non-empty) so operators catch a copy-paste error.
 		return fmt.Errorf("http.Config: PeerURLs must not contain this node's own ID %q", c.NodeID)
 	}
 	return nil

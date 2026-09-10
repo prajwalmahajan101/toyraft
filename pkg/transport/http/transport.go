@@ -48,8 +48,9 @@ var _ raft.Transport = (*Transport)(nil)
 //
 // A nil cfg.Clock defaults to the real clock (parity with raft.Config), so an
 // external caller who cannot construct internal/clock may leave it unset.
-// PeerURLs must be non-empty (Config.Validate); a self-URL or empty NodeID is
-// rejected. New returns the validation error verbatim.
+// PeerURLs may be empty for a single-node self-only cluster (friction-5); a
+// self-URL or empty NodeID is rejected. New returns the validation error
+// verbatim.
 func New(cfg Config) (*Transport, error) {
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
