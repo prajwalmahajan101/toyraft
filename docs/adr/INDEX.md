@@ -38,3 +38,4 @@ one-line summary. Order is by number.
 - [ADR-0021](0021-observability-published-daemon-side.md) — Observability published daemon-side: expvar `raft.*` counters + un-gated `/status` + structured RPC/role logs.
 - [ADR-0022](0022-goreleaser-dual-binary-release.md) — GoReleaser release build shipping `toyraftd` + `toyraftctl` across `{linux, macOS} × {amd64, arm64}`; library ships via plain semver tags.
 - [ADR-0023](0023-http-transport-defaults-nil-clock.md) — `pkg/transport/http` `New` defaults a nil `Config.Clock` to the real clock (parity with `raft.Config`), making the transport externally constructible.
+- [ADR-0024](0024-durable-applied-snapshot-restore.md) — Durable applied checkpoint via `SaveSnapshot`/`LoadSnapshot` + `Snapshot`/`Restore` (snapshot = applied floor, resume-then-replay-tail); restore the in-memory log from Storage on restart so a restarted leader can accept writes.
