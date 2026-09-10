@@ -112,6 +112,16 @@ type Config struct {
 	// join. Default 5s (API-08/SC5; applied by applyDefaults).
 	StopTimeout time.Duration
 
+	// SnapshotInterval is the number of applied entries between durable
+	// StateMachine checkpoints (ADR-0024). The applier takes a snapshot once
+	// appliedIndex has advanced this many entries past the last checkpoint;
+	// Stop always takes a final checkpoint regardless. A checkpoint is the
+	// durable applied floor — on restart the node resumes Apply from it rather
+	// than replaying the whole committed log. Default 1024 (applyDefaults). A
+	// StateMachine whose Snapshot returns ErrSnapshotUnsupported opts out and
+	// falls back to full-log replay on restart.
+	SnapshotInterval Index
+
 	// Logger is the structured logger. nil is replaced by a silent logger
 	// (slog.New(slog.DiscardHandler)) during applyDefaults — a library MUST
 	// NOT write to stderr unless the consumer opts in by setting Logger.
@@ -144,6 +154,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.StopTimeout == 0 {
 		c.StopTimeout = 5 * time.Second
+	}
+	if c.SnapshotInterval == 0 {
+		c.SnapshotInterval = defaultSnapshotInterval
 	}
 	if c.Logger == nil {
 		// R-3: a library defaults to SILENT — no stderr output unless the

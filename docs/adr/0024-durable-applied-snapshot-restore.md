@@ -65,7 +65,7 @@ is a no-op.
    forward-compat (STOR-01) is preserved because those signatures are untouched;
    the new pair is the working durable path.
 3. The driver checkpoints after applying: every `Config.SnapshotInterval` applied
-   entries (default 1024; 0 disables), and unconditionally on `Stop` after the
+   entries (default 1024 when unset), and unconditionally on `Stop` after a clean
    apply drain. A checkpoint calls `StateMachine.Snapshot()` and persists the blob
    + index via `Storage.SaveSnapshot`.
 4. On construction / `Start`, the node loads the latest snapshot, calls

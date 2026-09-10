@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 )
@@ -64,6 +65,38 @@ func (n *nodeImpl) applyOne(e Entry) {
 	if ch, ok := n.waiters.LoadAndDelete(e.Index); ok {
 		ch.(chan proposeResult) <- proposeResult{res: res, err: err}
 	}
+	// Periodic durable checkpoint (B2 / ADR-0024): once appliedIndex has
+	// advanced SnapshotInterval past the last checkpoint, persist a snapshot so
+	// a restart resumes Apply from here instead of replaying the whole log.
+	if e.Index >= Index(n.snapshotIdx.Load())+n.cfg.SnapshotInterval {
+		n.checkpoint()
+	}
+}
+
+// checkpoint takes a durable StateMachine snapshot and persists it as the
+// applied floor (B2 / ADR-0024). Called by the applier at the SnapshotInterval
+// cadence and by Stop for a final checkpoint; both run OUTSIDE the core lock
+// (SM.Snapshot and Storage.SaveSnapshot are I/O). A StateMachine that returns
+// ErrSnapshotUnsupported opts out silently — it recovers by full-log replay.
+func (n *nodeImpl) checkpoint() {
+	data, sidx, err := n.cfg.StateMachine.Snapshot()
+	if err != nil {
+		if !errors.Is(err, ErrSnapshotUnsupported) {
+			n.cfg.Logger.Error("raft: StateMachine.Snapshot", "err", err)
+		}
+		return
+	}
+	if sidx == 0 {
+		return // nothing applied yet
+	}
+	n.core.mu.Lock()
+	term, _ := n.core.log.Term(sidx) // informational; 0 if unavailable
+	n.core.mu.Unlock()
+	if err := n.cfg.Storage.SaveSnapshot(Snapshot{Index: sidx, Term: term, Data: data}); err != nil {
+		n.cfg.Logger.Error("raft: SaveSnapshot", "index", sidx, "err", err)
+		return
+	}
+	n.snapshotIdx.Store(uint64(sidx))
 }
 
 // Fatal returns the node-level fatal error set when a StateMachine.Apply call
