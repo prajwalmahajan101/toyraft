@@ -154,9 +154,16 @@ demo commands ship as release binaries.
   entries. The Figure-8 safety fix is the current-term commit rule (ADR-0010).
 - **Storage (`pkg/storage`).** A frozen interface (ADR-0005) with an
   append-only, per-message-fsynced file implementation and atomic `HardState`
-  rename (`pkg/storage/file`). `Snapshot`/`Restore` are v1 stubs.
+  rename (`pkg/storage/file`). Durable `SaveSnapshot`/`LoadSnapshot` back the
+  applied-checkpoint path (ADR-0024); the frozen `Snapshot`/`Restore` methods
+  stay reserved for v2 compaction.
 - **Transport (`pkg/transport`).** In-process Hub for deterministic chaos tests
   (ADR-0007) and an HTTP transport (ADR-0015) speaking `POST /raft/message`.
+  Embedding a **single node** (`Config.Peers = [self]`)? Either transport works
+  with a zero-value `Clock`: `inproc.NewHub(inproc.HubConfig{})` +
+  `hub.Transport(self)`, or `http.Config{PeerURLs: nil}` (empty = self-only).
+  See the "Embedding toyraft" guide in [`docs/LLD.md`](docs/LLD.md#7-embedding-toyraft)
+  for the restart/snapshot contract.
 - **Demo daemon (`cmd/toyraftd`).** Two listeners (ADR-0016): the peer transport
   on the PEER port, and a client KV API on the CLIENT port. A follower answers
   `/kv` and `/status` with a `307` redirect (+ `X-Raft-Leader-Hint`) to the

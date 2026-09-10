@@ -157,6 +157,22 @@ type HardState struct {
 }
 ```
 
+### Snapshot
+
+```go
+// Snapshot is a durable point-in-time checkpoint of the StateMachine's applied
+// state (ADR-0024). Data is the opaque blob produced by StateMachine.Snapshot;
+// Index/Term identify the last log entry the blob includes. It is the durable
+// applied floor: on restart the node calls StateMachine.Restore(Data) and
+// resumes Apply from Index+1, so committed entries at or below Index are never
+// re-applied. The zero value (Index 0, nil Data) means "no snapshot yet".
+type Snapshot struct {
+    Index Index
+    Term  Term
+    Data  []byte
+}
+```
+
 ### Config
 
 ```go
@@ -194,6 +210,11 @@ type Config struct {
     Logger      *slog.Logger
     Seed        int64
     StopTimeout time.Duration // upper bound on Stop() drain; default 5s
+
+    // SnapshotInterval is the number of applied entries between durable
+    // StateMachine checkpoints (ADR-0024); default 1024. Stop also takes a
+    // final checkpoint on a clean drain, so a clean restart replays nothing.
+    SnapshotInterval Index
 }
 ```
 
@@ -261,8 +282,11 @@ type Node interface {
     // committed AND applied (Apply has been called on this node's StateMachine),
     // or the context expires, or leadership is lost.
     //
+    // The fourth return value is the opaque result StateMachine.Apply returned
+    // for this entry (e.g. an assigned ID); nil on any error path (ADR-0024).
+    //
     // Invariants:
-    //   - Returns (index, term, nil) only after the command has been applied.
+    //   - Returns (index, term, result, nil) only after the command has been applied.
     //   - On leader loss before commit, returns ErrProposalDropped.
     //   - On follower/candidate role, returns ErrNotLeader with LeaderHint set.
     //
@@ -271,7 +295,7 @@ type Node interface {
     //   - ErrProposalDropped — safe to retry.
     //   - ErrStopped — node is shut down; do not retry on this Node.
     //   - ctx.Err() — caller's deadline; the entry MAY still commit later.
-    Propose(ctx context.Context, data []byte) (Index, Term, error)
+    Propose(ctx context.Context, data []byte) (Index, Term, any, error)
 
     // Step is the inbound RPC entry point. Transport implementations call
     // Step for every Message received from a peer.
@@ -514,6 +538,14 @@ type StateStorage interface {
     //
     // v1: implementors MUST return ErrSnapshotUnsupported.
     Restore(data []byte) error
+
+    // SaveSnapshot / LoadSnapshot are the WORKING durable-checkpoint path
+    // (ADR-0024), distinct from the frozen Snapshot()/Restore() stubs above
+    // (which stay ErrSnapshotUnsupported for STOR-01 forward-compat).
+    // SaveSnapshot persists a Snapshot atomically; LoadSnapshot returns the
+    // most recent one, or the zero Snapshot{} on a fresh store.
+    SaveSnapshot(snap Snapshot) error
+    LoadSnapshot() (Snapshot, error)
 }
 ```
 
@@ -684,7 +716,59 @@ All chaos knobs are seeded from the Hub's RNG, which is itself seeded from `Conf
 
 ---
 
-## 7. Cross-references
+## 7. Embedding toyraft
+
+This section is the external-embedder guide (added at v1.0.0-rc.3 from toymq v3
+M1 dogfooding; see ADR-0023 / ADR-0024). It covers a **single-node** embed —
+`Config.Peers = []NodeID{self}` — which is the common bring-up shape before a
+consumer grows to a real multi-node cluster.
+
+### Transport choice (single node)
+
+A single-node cluster never sends an RPC to a peer, so either shipped transport
+works once you leave `Clock` unset (external modules cannot construct
+`internal/clock`; both transports default a nil `Clock` to the real clock —
+ADR-0023):
+
+- **`pkg/transport/inproc`** — simplest. `inproc.NewHub(inproc.HubConfig{})`
+  (zero value; nil `Clock` defaults to real), then `hub.Transport(self)`. No
+  ports, no network. Recommended for an in-process single-node embed.
+- **`pkg/transport/http`** — use when you expect to grow to multi-node over the
+  network. `http.Config{NodeID: self, ListenAddr: addr, PeerURLs: nil}` is now
+  valid: an **empty `PeerURLs`** is the self-only case (friction-5). Add peer
+  URLs when you add peers.
+
+Both were previously unusable for a single-node external embed (the inproc
+nil-`Clock` hard error and the http empty-`PeerURLs` rejection); rc.3 removes
+both barriers.
+
+### Restart / snapshot contract (ADR-0024)
+
+On restart the node restores its in-memory log from `Storage` (so a restarted
+leader accepts writes) and loads the durable snapshot to resume application:
+
+- Implement `StateMachine.Snapshot`/`Restore`. `Snapshot` returns `(blob,
+  lastAppliedIndex, nil)`; `Restore(blob)` rebuilds state. The node persists the
+  blob via `Storage.SaveSnapshot` every `Config.SnapshotInterval` applied
+  entries (default 1024) and once more on a clean `Stop`.
+- On restart the node calls `Restore` and resumes `Apply` from
+  `snapshot.Index+1`. A **clean restart replays nothing** — `Apply` is not
+  called again for already-applied entries. After a crash between checkpoints,
+  entries in `(lastSnapshot, commit]` replay, so an `Apply` with durable side
+  effects should be **idempotent over that window** (inherent to snapshot-based
+  Raft).
+- A `StateMachine` that returns `ErrSnapshotUnsupported` from `Snapshot` opts out
+  and falls back to full-log replay on every restart (the pre-rc.3 behaviour).
+
+### Recovering an Apply result
+
+`Propose` returns `(Index, Term, any, error)`; the third value is whatever
+`StateMachine.Apply` returned for the committed entry (e.g. an assigned ID), so
+you do not need an out-of-band nonce→channel registry (friction-3).
+
+---
+
+## 8. Cross-references
 
 - **Wire JSON projection of `Message`:** see [`docs/WIRE.md`](./WIRE.md).
 - **Goroutine and lock model that drives `Node`, `Storage`, `Transport`:** see `docs/CONCURRENCY.md` (Phase 1 Plan 4).
