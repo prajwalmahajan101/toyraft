@@ -413,6 +413,21 @@ const (
 	Candidate
 	Leader
 )
+type Snapshot struct {
+	Index Index
+	Term  Term
+	Data  []byte
+}
+    Snapshot is a durable point-in-time checkpoint of the StateMachine's applied
+    state (ADR-0024). Data is the opaque blob produced by StateMachine.Snapshot;
+    Index/Term identify the last log entry the blob includes. It is the durable
+    applied floor: on restart the node calls StateMachine.Restore(Data) and
+    resumes Apply from Index+1, so committed entries at or below Index are never
+    re-applied.
+
+    The zero value (Index 0, nil Data) means "no snapshot yet" — the value
+    LoadSnapshot returns on a fresh store.
+
 type StateMachine interface {
 	// Apply executes a committed Entry and returns an opaque result that is
 	// delivered back to the proposing client if the proposal was local.
@@ -486,6 +501,14 @@ type Storage interface {
 	LoadHardState() (HardState, error)
 	Snapshot() (data []byte, lastIndex Index, err error)
 	Restore(data []byte) error
+
+	// Durable applied-checkpoint methods (ADR-0024). SaveSnapshot persists a
+	// Snapshot atomically; LoadSnapshot returns the most recent one, or the
+	// zero Snapshot{} on a fresh store. Distinct from the frozen
+	// Snapshot()/Restore() stubs above, which stay ErrSnapshotUnsupported
+	// (STOR-01 forward-compat).
+	SaveSnapshot(snap Snapshot) error
+	LoadSnapshot() (Snapshot, error)
 }
     Storage is the subset of pkg/storage.Storage that the internal *node
     consumes. Declared here (rather than imported) to defeat the import cycle
@@ -656,6 +679,28 @@ type StateStorage interface {
 	//
 	// v1: implementors MUST return ErrSnapshotUnsupported.
 	Restore(data []byte) error
+
+	// SaveSnapshot durably persists a StateMachine checkpoint (ADR-0024).
+	// This is the WORKING durable-snapshot path — distinct from the frozen
+	// Snapshot()/Restore() stubs above, which stay ErrSnapshotUnsupported for
+	// STOR-01 forward-compat.
+	//
+	// Invariants:
+	//   - MUST be atomic and durable: a crash mid-call leaves either the prior
+	//     or the new snapshot fully on disk, never a torn write.
+	//   - Implementations SHOULD use the tmp+rename pattern on Unix.
+	//
+	// Error contract:
+	//   - Wraps the underlying I/O error with %w.
+	SaveSnapshot(snap raft.Snapshot) error
+
+	// LoadSnapshot returns the most recently persisted Snapshot, or the zero
+	// value if none has ever been saved (fresh store).
+	//
+	// Error contract:
+	//   - A missing snapshot is NOT an error; returns (raft.Snapshot{}, nil).
+	//   - A corrupt snapshot IS an error; wraps the parse error with %w.
+	LoadSnapshot() (raft.Snapshot, error)
 }
     StateStorage persists HardState (the durable Raft state) and exposes the v1
     snapshot stubs.
@@ -716,6 +761,11 @@ func RunConformance(t *testing.T, f Factory)
       - HardStateFreshIsZero — LoadHardState on fresh store returns (zero, nil)
       - SnapshotStub — Snapshot returns (nil, 0, ErrSnapshotUnsupported)
       - RestoreStub — Restore returns ErrSnapshotUnsupported
+      - SnapshotFreshIsZero — LoadSnapshot on fresh store returns (zero, nil)
+      - SnapshotRoundtrip — SaveSnapshot/LoadSnapshot preserve all fields
+      - SnapshotOverwrite — a second SaveSnapshot replaces the prior one
+      - SnapshotCallerCanMutate — mutating SaveSnapshot input after return does
+        not corrupt store
       - EntriesCallerCanMutate — mutating Entries' return does not corrupt store
       - AppendCallerCanMutate — mutating Append's input after return does not
         corrupt store

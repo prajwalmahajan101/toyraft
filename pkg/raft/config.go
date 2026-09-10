@@ -32,6 +32,14 @@ type Storage interface {
 	LoadHardState() (HardState, error)
 	Snapshot() (data []byte, lastIndex Index, err error)
 	Restore(data []byte) error
+
+	// Durable applied-checkpoint methods (ADR-0024). SaveSnapshot persists a
+	// Snapshot atomically; LoadSnapshot returns the most recent one, or the
+	// zero Snapshot{} on a fresh store. Distinct from the frozen
+	// Snapshot()/Restore() stubs above, which stay ErrSnapshotUnsupported
+	// (STOR-01 forward-compat).
+	SaveSnapshot(snap Snapshot) error
+	LoadSnapshot() (Snapshot, error)
 }
 
 // Config carries the construction-time parameters of a Raft node.

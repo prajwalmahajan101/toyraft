@@ -154,6 +154,16 @@ func (o *OrderingStorage) Restore(data []byte) error {
 	return o.inner.Restore(data)
 }
 
+// SaveSnapshot delegates (ADR-0024).
+func (o *OrderingStorage) SaveSnapshot(snap raft.Snapshot) error {
+	return o.inner.SaveSnapshot(snap)
+}
+
+// LoadSnapshot delegates (ADR-0024).
+func (o *OrderingStorage) LoadSnapshot() (raft.Snapshot, error) {
+	return o.inner.LoadSnapshot()
+}
+
 // RecordSend is called by the test driver immediately BEFORE handing
 // the message to a transport. The recording goes into the same event
 // log as SaveHardState so the precedence assertion can compare seq
