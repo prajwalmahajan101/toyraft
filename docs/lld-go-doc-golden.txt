@@ -919,7 +919,9 @@ func (h *Hub) Transport(id raft.NodeID) raft.Transport
     ONLY this node's delivery (pump-stop; the Hub and other nodes keep running).
 
 type HubConfig struct {
-	// Clock drives the dispatcher's logical time. Required. Tests pass a
+	// Clock drives the dispatcher's logical time. Optional; a nil Clock
+	// defaults to the real clock in NewHub so external embedders can build a
+	// Hub without constructing internal/clock. In-module tests pass a
 	// *clock.Fake here so message delivery is reproducible from a seed.
 	Clock clock.Clock
 
@@ -947,7 +949,7 @@ type HubConfig struct {
 	// other caller (hub_test / chaos_test / transporttest conformance).
 	SyncDelivery bool
 }
-    HubConfig configures a Hub. Zero-value-safe modulo Clock: NewHub returns
-    an actionable error when Clock is nil (FOUND-05 spirit). InboundCap and
-    CloseTimeout receive sane defaults when zero.
+    HubConfig configures a Hub. Fully zero-value-safe: NewHub defaults a nil
+    Clock to the real clock (ADR-0023 parity), and InboundCap and CloseTimeout
+    receive sane defaults when zero.
 

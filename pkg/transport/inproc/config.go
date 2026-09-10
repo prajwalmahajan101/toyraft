@@ -6,11 +6,13 @@ import (
 	"github.com/prajwalmahajan101/toyraft/internal/clock"
 )
 
-// HubConfig configures a Hub. Zero-value-safe modulo Clock: NewHub returns
-// an actionable error when Clock is nil (FOUND-05 spirit). InboundCap and
-// CloseTimeout receive sane defaults when zero.
+// HubConfig configures a Hub. Fully zero-value-safe: NewHub defaults a nil
+// Clock to the real clock (ADR-0023 parity), and InboundCap and CloseTimeout
+// receive sane defaults when zero.
 type HubConfig struct {
-	// Clock drives the dispatcher's logical time. Required. Tests pass a
+	// Clock drives the dispatcher's logical time. Optional; a nil Clock
+	// defaults to the real clock in NewHub so external embedders can build a
+	// Hub without constructing internal/clock. In-module tests pass a
 	// *clock.Fake here so message delivery is reproducible from a seed.
 	Clock clock.Clock
 
@@ -43,3 +45,14 @@ const (
 	defaultInboundCap   = 256
 	defaultCloseTimeout = 100 * time.Millisecond
 )
+
+// applyDefaults fills a nil Clock with the real clock so external embedders —
+// who cannot construct internal/clock — can build a Hub by leaving Clock unset.
+// Mirrors pkg/raft.Config and pkg/transport/http.Config (ADR-0023); called by
+// NewHub before use. InboundCap/CloseTimeout keep their own zero-defaults in
+// NewHub. In-module tests still inject a *clock.Fake for deterministic delivery.
+func (c *HubConfig) applyDefaults() {
+	if c.Clock == nil {
+		c.Clock = clock.NewReal()
+	}
+}

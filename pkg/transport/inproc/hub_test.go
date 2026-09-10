@@ -39,11 +39,8 @@ func msg(from, to raft.NodeID, term raft.Term) raft.Message {
 	}
 }
 
-func TestNewHub_RequiresClock(t *testing.T) {
-	if _, err := inproc.NewHub(inproc.HubConfig{}); err == nil {
-		t.Fatal("NewHub with nil Clock returned nil error; want actionable error")
-	}
-}
+// (NewHub no longer errors on a nil Clock — it defaults to the real clock;
+// see TestNewHubDefaultsNilClock for the friction-4 regression, ADR-0023.)
 
 // TestHub_FIFODelivery_SameSeed sends 10 messages A->B and asserts the
 // receiver sees them in send order. Since deliverAt = clk.Now() with no
@@ -225,5 +222,31 @@ func TestHub_PeerIteration_IsSortedSlice(t *testing.T) {
 	// future contributor adds one we want CI to red here.
 	if regexp.MustCompile(`for\s+\w+\s*(?:,\s*\w+\s*)?:=\s*range\s+h\.nodes`).MatchString(body) {
 		t.Fatal("hub.go iterates h.nodes via map range; switch to walking the sortedNodes slice (RESEARCH Pitfall 2)")
+	}
+}
+
+// TestNewHubDefaultsNilClock proves friction-4: an external embedder can build
+// a Hub with a zero-value HubConfig — a nil Clock defaults to the real clock
+// (ADR-0023 parity) instead of the previous hard error. Delivery still works
+// end to end over the defaulted clock.
+func TestNewHubDefaultsNilClock(t *testing.T) {
+	h, err := inproc.NewHub(inproc.HubConfig{}) // nil Clock -> real clock
+	if err != nil {
+		t.Fatalf("NewHub(zero HubConfig): %v", err)
+	}
+	defer func() { _ = h.Close() }()
+
+	a := h.Connect("a")
+	b := h.Connect("b")
+	if err := a.Send(context.Background(), raft.Message{Type: raft.MsgAppendEntries, From: "a", To: "b"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	select {
+	case msg := <-b.Recv():
+		if msg.From != "a" {
+			t.Errorf("delivered msg.From = %q, want a", msg.From)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("message not delivered over defaulted real clock within 2s")
 	}
 }
