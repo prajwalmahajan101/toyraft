@@ -23,3 +23,6 @@ vendor/
 .vscode/
 *.swp
 *.swo
+
+# code_assist planning artifacts (local-only, mirrors .planning)
+.code_assist/
