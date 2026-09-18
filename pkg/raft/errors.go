@@ -63,3 +63,22 @@ func (e *ErrNotLeader) Error() string {
 // ErrProposalDropped is returned by Propose when leadership is lost before
 // the proposed entry commits. Safe to retry (LLD §3 Propose contract).
 var ErrProposalDropped = errors.New("raft: proposal dropped (leadership lost before commit)")
+
+// IsNotLeader reports whether err means "this node cannot commit a write as
+// leader — redirect the client elsewhere." It unifies the three distinct
+// errors Propose can return for that single client-facing condition:
+//
+//   - *ErrNotLeader     — the write hit a follower/candidate.
+//   - ErrProposalDropped — leadership was lost mid-propose.
+//   - ErrStopped         — the node is shutting down or not yet started.
+//
+// Each is correct behaviour, but a consumer building a redirect layer treats
+// all three identically ("go ask another member"). Branch on this predicate
+// rather than hand-rolling the classification (dogfood FRICTION-05). It
+// unwraps via errors.As/errors.Is, so a wrapped error still classifies.
+func IsNotLeader(err error) bool {
+	var nl *ErrNotLeader
+	return errors.As(err, &nl) ||
+		errors.Is(err, ErrProposalDropped) ||
+		errors.Is(err, ErrStopped)
+}
