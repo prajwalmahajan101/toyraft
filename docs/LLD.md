@@ -239,11 +239,11 @@ type Config struct {
 type Status struct {
     Role         Role
     Term         Term
-    CommitIndex  Index
-    ApplyIndex   Index
-    LastLogIndex Index             // last index present in the local log (>= CommitIndex)
+    CommitIndex  Index             // highest index known committed (quorum-replicated)
+    ApplyIndex   Index             // highest index passed to StateMachine.Apply
+    LastLogIndex Index             // last local-log index; LastLogIndex >= CommitIndex >= ApplyIndex
     LeaderHint   NodeID            // best-known current leader, or empty
-    MatchIndex   map[NodeID]Index  // leader-only; nil on followers
+    MatchIndex   map[NodeID]Index  // leader-only (nil on followers); INCLUDES self at LastLogIndex — exclude NodeID() for a follower count
 }
 ```
 
@@ -319,6 +319,15 @@ type Node interface {
     // LeaderHint returns the currently-believed leader, or empty if unknown.
     // Equivalent to Status().LeaderHint but avoids the map copy.
     LeaderHint() NodeID
+
+    // NodeID returns this node's own immutable id (Config.NodeID), so an
+    // embedder can exclude self from Status().MatchIndex (ADR-0025 / FRICTION-06).
+    NodeID() NodeID
+
+    // NotifyC returns a coalescing (cap 1, level-triggered) signal that fires
+    // when commitIndex bumps or a follower's MatchIndex advances — block on it
+    // instead of polling Status() for a WAIT barrier (ADR-0025 / FRICTION-07).
+    NotifyC() <-chan struct{}
 }
 
 // New constructs a Node from the given Config. Validates all required fields;
@@ -765,6 +774,59 @@ leader accepts writes) and loads the durable snapshot to resume application:
 `Propose` returns `(Index, Term, any, error)`; the third value is whatever
 `StateMachine.Apply` returned for the committed entry (e.g. an assigned ID), so
 you do not need an out-of-band nonce→channel registry (friction-3).
+
+### Redirecting a client around a non-leader (FRICTION-05)
+
+`Propose` can reject with three distinct errors — `*ErrNotLeader` (hit a
+follower), `ErrProposalDropped` (leadership lost mid-propose), `ErrStopped` (node
+stopping) — that a client-facing server treats identically: "go ask another
+member." Use `raft.IsNotLeader(err) bool` instead of hand-rolling that
+classification; it unwraps via `errors.As`/`errors.Is`. Read `LeaderHint` off a
+`*ErrNotLeader` (or `Node.LeaderHint()`) for the redirect target.
+
+### Counting followers for a WAIT/ack barrier (FRICTION-06)
+
+`Status().MatchIndex` is leader-only and keyed over **all** peers **including this
+node** (self at `LastLogIndex`). A per-*follower* ack count must exclude self:
+
+```go
+selfID := node.NodeID() // this node's own id — no need to thread the config in
+acks := 0
+for id, mi := range st.MatchIndex {
+    if id != selfID && mi >= idx {
+        acks++
+    }
+}
+```
+
+### Blocking on replication progress instead of polling (FRICTION-07)
+
+`Node.NotifyC() <-chan struct{}` fires (coalescing, cap 1, level-triggered) when
+`commitIndex` bumps or a follower's `MatchIndex` advances. A `WAIT`-style barrier
+blocks on it and re-reads `Status()` on each wake, rather than polling on a
+ticker:
+
+```go
+for {
+    if enoughAcks(node.Status()) { return nil }
+    select {
+    case <-node.NotifyC():   // progress advanced; re-check
+    case <-ctx.Done():
+        return ctx.Err()
+    }
+}
+```
+
+Signals may coalesce, so always re-derive from `Status()` after a wake; never
+count wakes.
+
+### Commit latency and the tick interval (FRICTION-08)
+
+`Propose` and inbound `Step` trigger an **immediate** replication flush, so a
+lightly-loaded write is not floored by the tick period. `HeartbeatInterval`
+(the driver tick period) still bounds the *idle* heartbeat cadence and the
+worst-case latency if a wake is ever coalesced away — tune it down for lower
+idle latency at the cost of more heartbeat traffic.
 
 ---
 
