@@ -40,18 +40,35 @@ func (n *nodeImpl) runTicker(ctx context.Context) {
 			if err := n.core.Step(Message{Type: MsgTick}); err != nil && !errors.Is(err, ErrStopped) {
 				n.cfg.Logger.Error("raft: tick Step", "err", err)
 			}
-			msgs, hs := n.core.Ready() // copy-under-lock; lock released on return
-			if hs != nil {             // SC5: persist HardState BEFORE any Send
-				_ = n.cfg.Storage.SaveHardState(*hs)
-			}
-			for _, m := range msgs { // best-effort; Send errors logged, not fatal
-				if err := n.cfg.Transport.Send(ctx, m); err != nil {
-					n.cfg.Logger.Debug("raft: Send", "to", m.To, "err", err)
-				}
-			}
-			n.drainCommitsToApply(ctx) // R-7 apply seam (pushes onto bounded applyCh)
+			n.flush(ctx)
+		case <-n.wake:
+			// FRICTION-08: an out-of-tick flush requested by Propose (queued
+			// AppendEntries) or the inbound Step callback (follower ack / commit
+			// advance). No Step here — the state was already mutated under lock by
+			// the signaller; we only ship what Ready() has pending and drain
+			// newly-committed entries. Same single-sender guarantee as the tick.
+			n.flush(ctx)
 		}
 	}
+}
+
+// flush is the Ready->SaveHardState->Send->drain block shared by the tick and
+// wake paths of runTicker. Ready() copies pendingMsgs/pendingHS under n.core.mu
+// and releases the lock on return, so every Send below runs with NO lock held
+// and SaveHardState always precedes any Send (SC5 / Global Invariant 1). It
+// runs ONLY on the single driver goroutine, so concurrent tick+wake never
+// interleave Sends.
+func (n *nodeImpl) flush(ctx context.Context) {
+	msgs, hs := n.core.Ready() // copy-under-lock; lock released on return
+	if hs != nil {             // SC5: persist HardState BEFORE any Send
+		_ = n.cfg.Storage.SaveHardState(*hs)
+	}
+	for _, m := range msgs { // best-effort; Send errors logged, not fatal
+		if err := n.cfg.Transport.Send(ctx, m); err != nil {
+			n.cfg.Logger.Debug("raft: Send", "to", m.To, "err", err)
+		}
+	}
+	n.drainCommitsToApply(ctx) // R-7 apply seam (pushes onto bounded applyCh)
 }
 
 // runInbound is the documented inbound seam. The LLD §3 Transport delivers

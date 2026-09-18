@@ -80,6 +80,12 @@ type node struct {
 	pendingMsgs []pendingMsg
 	pendingHS   *HardState
 
+	// notifyC is the coalescing progress-advance signal exposed to embedders
+	// via Node.NotifyC() (FRICTION-07). notifyProgressLocked fires it
+	// (non-blocking, cap 1) when commitIndex bumps or a follower's matchIndex
+	// advances, so a WAIT/ack barrier can block instead of polling Status().
+	notifyC chan struct{}
+
 	// Construction-time captured references.
 	storage Storage
 	cfg     *Config
@@ -140,6 +146,7 @@ func newNode(cfg *Config) (*node, error) {
 		log:        &Log{},
 		nextIndex:  make(map[NodeID]Index),
 		matchIndex: make(map[NodeID]Index),
+		notifyC:    make(chan struct{}, 1), // coalescing; FRICTION-07
 		storage:    cfg.Storage,
 		cfg:        cfg,
 		log2:       cfg.Logger,
@@ -201,6 +208,18 @@ func (n *node) restoreLogFromStorage() error {
 	}
 	n.log.Append(ents...)
 	return nil
+}
+
+// notifyProgressLocked fires the embedder-facing progress-advance signal
+// (FRICTION-07). Non-blocking + coalescing: if a prior signal is undrained the
+// send is dropped, so a slow or absent consumer never stalls the state machine
+// and never blocks under n.mu. Callers MUST hold n.mu (the channel is created
+// once in newNode and never reassigned, but the fire-sites are Locked methods).
+func (n *node) notifyProgressLocked() {
+	select {
+	case n.notifyC <- struct{}{}:
+	default:
+	}
 }
 
 // Step is the single inbound event point for the state machine. It is

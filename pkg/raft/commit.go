@@ -63,4 +63,5 @@ func (n *node) maybeAdvanceCommitLocked() {
 	}
 	n.commitIndex = quorumIndex
 	n.queueHardStateLocked()
+	n.notifyProgressLocked() // FRICTION-07: commitIndex advanced
 }
