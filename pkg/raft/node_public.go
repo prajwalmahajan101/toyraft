@@ -87,6 +87,25 @@ type Node interface {
 	// LeaderHint returns the currently-believed leader, or empty if unknown.
 	// Equivalent to Status().LeaderHint but avoids the map copy.
 	LeaderHint() NodeID
+
+	// NodeID returns this node's own stable identifier (Config.NodeID). It is
+	// immutable for the node's lifetime. Provided so an embedder holding only
+	// the Node interface can exclude self from Status().MatchIndex — which is
+	// keyed over ALL peers including this node — when counting *followers* for
+	// a WAIT/ack barrier, without threading its config id in by hand
+	// (dogfood FRICTION-06).
+	NodeID() NodeID
+
+	// NotifyC returns a coalescing signal channel that fires whenever this
+	// node's replication progress advances — commitIndex bumps, or a follower's
+	// MatchIndex advances on the leader. A WAIT/ack barrier can block on this
+	// instead of polling Status() on a ticker (dogfood FRICTION-07).
+	//
+	// The channel is level-triggered and coalescing (cap 1): a consumer MUST
+	// re-read Status() after each wake to observe current progress; intermediate
+	// signals may be collapsed into one. The send is always non-blocking, so a
+	// consumer that never drains it costs the node nothing.
+	NotifyC() <-chan struct{}
 }
 
 // nodeImpl is the concrete Node. It wraps the internal *node state machine
@@ -130,6 +149,24 @@ type nodeImpl struct {
 	waiters sync.Map              // map[Index]chan proposeResult; 07-03 registers/resolves
 	fatal   atomic.Pointer[error] // set on Apply panic (API-06); 07-03
 	stopped atomic.Bool           // true after Stop; Propose/Step guard
+
+	// wake is the driver's out-of-tick flush signal (cap 1, coalescing;
+	// FRICTION-08). Propose (after appending + queuing AppendEntries) and the
+	// inbound Step callback fire it so runTicker runs its Ready->Send->drain
+	// flush immediately, instead of the write waiting for the next tick. All
+	// Transport.Send still happen ONLY in runTicker (single-sender invariant
+	// / SC5 no-Send-under-lock is preserved); wake merely triggers that block.
+	wake chan struct{}
+}
+
+// signalWake nudges the driver to flush now (FRICTION-08). Non-blocking +
+// coalescing: a pending wake absorbs the signal, so callers never block and a
+// burst collapses to one flush.
+func (n *nodeImpl) signalWake() {
+	select {
+	case n.wake <- struct{}{}:
+	default:
+	}
 }
 
 // proposeResult carries an applied proposal's outcome from the apply loop
@@ -179,6 +216,7 @@ func New(cfg Config) (Node, error) {
 		core:    core,
 		cfg:     &cfg,
 		applyCh: make(chan Entry, applyBuf(&cfg)),
+		wake:    make(chan struct{}, 1), // coalescing driver flush signal (FRICTION-08)
 	}
 	// Load the durable applied checkpoint and restore the StateMachine to it
 	// (B2 / ADR-0024). Seeding enqueuedIdx=appliedIdx=snap.Index makes the
@@ -237,6 +275,13 @@ func (n *nodeImpl) LeaderHint() NodeID {
 	return n.core.leaderHint
 }
 
+// NodeID returns this node's own identifier (immutable after New, so no lock).
+func (n *nodeImpl) NodeID() NodeID { return n.core.id }
+
+// NotifyC returns the receive end of the core's coalescing progress-advance
+// signal (FRICTION-07). See the Node interface doc for the contract.
+func (n *nodeImpl) NotifyC() <-chan struct{} { return n.core.notifyC }
+
 // Step is the inbound RPC entry point (R-6). It guards against a stopped node,
 // honours ctx cancellation at the handoff boundary, then delegates to the
 // ctx-free internal core. The core MUST NOT see ctx (Global Invariant: Step
@@ -294,10 +339,17 @@ func (n *nodeImpl) Propose(ctx context.Context, data []byte) (Index, Term, any, 
 	}
 	idx, ok := n.core.proposeLocked(data)
 	term := n.core.currentTerm
+	if ok {
+		// FRICTION-08: queue the AppendEntries fan-out now, under the same lock,
+		// so the flush below ships it immediately rather than on the next tick.
+		// (N=1 self-quorum commit also advances here via maybeAdvanceCommitLocked.)
+		n.core.broadcastAppendEntriesLocked()
+	}
 	n.core.mu.Unlock()
 	if !ok {
 		return 0, 0, nil, ErrProposalDropped
 	}
+	n.signalWake() // flush the queued AppendEntries + drain any new commit now
 
 	ch := make(chan proposeResult, 1) // cap 1: applier's send never blocks (Pitfall 5)
 	n.waiters.Store(idx, ch)
@@ -324,7 +376,15 @@ func (n *nodeImpl) Start(ctx context.Context) error {
 	n.startOnce.Do(func() {
 		rctx, cancel := context.WithCancel(context.Background()) // ROOT ctx, NOT caller ctx
 		n.cancel = cancel
-		n.cfg.Transport.Register(n.Step) // LLD §3: Register BEFORE goroutines run
+		// Register the inbound callback, wrapped to nudge the driver after every
+		// Step (FRICTION-08): a Step may queue a follower ack or advance
+		// commitIndex, and we flush those immediately instead of waiting a tick.
+		// A wake with nothing pending is a harmless no-op flush.
+		n.cfg.Transport.Register(func(ctx context.Context, m Message) error {
+			err := n.Step(ctx, m)
+			n.signalWake()
+			return err
+		})
 		n.wg.Add(3)
 		go n.runTicker(rctx)  // 07-03 supplies the real tick loop
 		go n.runInbound(rctx) // 07-03 supplies the real inbound dispatch

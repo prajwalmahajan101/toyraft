@@ -72,10 +72,19 @@ type Config struct {
 	ElectionTimeoutMin time.Duration
 	ElectionTimeoutMax time.Duration
 
-	// HeartbeatInterval is the leader's heartbeat cadence. P1-5 requires
-	// HeartbeatInterval*3 <= ElectionTimeoutMin so a single dropped
-	// heartbeat does not provoke an election. Default: 50ms (REPL-01 /
-	// LLD §2; RATIFIED decision 1 — see applyDefaults).
+	// HeartbeatInterval is the leader's heartbeat cadence AND the driver's tick
+	// period (tickInterval() == HeartbeatInterval). P1-5 requires
+	// HeartbeatInterval*3 <= ElectionTimeoutMin so a single dropped heartbeat
+	// does not provoke an election. Default: 50ms (REPL-01 / LLD §2; RATIFIED
+	// decision 1 — see applyDefaults).
+	//
+	// Commit-latency note (FRICTION-08): heartbeats and the commit->apply drain
+	// are tick-driven, but Propose and inbound Step now trigger an immediate
+	// out-of-tick flush, so a lightly-loaded cluster no longer pays a per-write
+	// tick penalty for the initial AppendEntries or the follower ack. This
+	// interval still bounds the *idle* heartbeat cadence and the worst-case
+	// latency if a wake is ever coalesced away; tune it down for lower idle
+	// latency at the cost of more heartbeat traffic.
 	HeartbeatInterval time.Duration
 
 	// Seed deterministically seeds the per-node math/rand/v2 RNG that

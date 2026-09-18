@@ -45,6 +45,23 @@ func (n *node) tickLeaderLocked() {
 	n.maybeAdvanceCommitLocked()
 }
 
+// broadcastAppendEntriesLocked fans out one AppendEntries per follower and
+// re-runs the commit rule, WITHOUT touching the heartbeat counter. It is the
+// tickLeaderLocked fan-out body, called off-tick by Propose (FRICTION-08) so a
+// freshly-appended entry replicates immediately instead of waiting for the next
+// tick. Caller MUST hold n.mu, and MUST have verified role==Leader (Propose
+// does, via proposeLocked). The maybeAdvanceCommitLocked call gives an N=1
+// cluster its self-quorum commit here too, matching tickLeaderLocked.
+func (n *node) broadcastAppendEntriesLocked() {
+	for _, peer := range n.peers {
+		if peer == n.id {
+			continue
+		}
+		n.sendAppendEntriesLocked(peer)
+	}
+	n.maybeAdvanceCommitLocked()
+}
+
 // sendAppendEntriesLocked builds and queues one MsgAppendEntries for peer
 // from that peer's nextIndex. Caller MUST hold n.mu.
 //
@@ -146,7 +163,8 @@ func (n *node) handleAppendEntriesRespLocked(m Message) {
 	if m.Success {
 		n.matchIndex[m.From] = m.MatchIndex
 		n.nextIndex[m.From] = m.MatchIndex + 1
-		n.maybeAdvanceCommitLocked() // commit.go
+		n.notifyProgressLocked()     // FRICTION-07: a follower's matchIndex advanced
+		n.maybeAdvanceCommitLocked() // commit.go (may also fire on a commit bump)
 		return
 	}
 	// REPL-04 slow probe: decrement and re-probe next tick. Floor at 1.
