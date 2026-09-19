@@ -320,6 +320,49 @@ func (h *harness) findLeader(deadline time.Time) (*node, bool) {
 	return nil, false
 }
 
+// waitStableLeader waits until the SAME node reports role=="leader" across
+// stableChecks CONSECUTIVE polls, or the deadline passes. It proves the cluster
+// has RE-CONVERGED on a single leader — not that it merely has *a* momentary
+// leader.
+//
+// This exists for the heal phase. pkg/raft v1 has no PreVote/CheckQuorum, so a
+// node that was isolated (its election timer firing unheard) rejoins with an
+// inflated term and forces at least one re-election; on unlucky real-clock
+// timing that can be a brief storm of several elections before an up-to-date
+// node wins and the victim (log behind) accepts it as follower. Gating the
+// commit-convergence oracle on a STABLE leader first keeps that storm out of
+// the oracle's measured window, which previously flaked the heal assertion
+// (a rare storm outran the fixed deadline; seed=13, 2026-09-18).
+func (h *harness) waitStableLeader(stableChecks int, deadline time.Time) (*node, bool) {
+	var last *node
+	streak := 0
+	for time.Now().Before(deadline) {
+		var cur *node
+		for _, n := range h.nodes {
+			if n.killed {
+				continue
+			}
+			if h.roleOf(n.clientAddr) == "leader" {
+				cur = n
+				break
+			}
+		}
+		switch cur {
+		case nil:
+			last, streak = nil, 0
+		case last:
+			streak++
+			if streak >= stableChecks {
+				return cur, true
+			}
+		default:
+			last, streak = cur, 1
+		}
+		time.Sleep(pollInterval)
+	}
+	return nil, false
+}
+
 // maxCommitIndex returns the largest commit_index reported by any live survivor (every
 // node except the excluded one and any already-killed node). Ported from
 // processkill/harness_test.go so netns_test.go (13-02) resolves it here.
