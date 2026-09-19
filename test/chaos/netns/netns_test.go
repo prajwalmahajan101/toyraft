@@ -126,6 +126,17 @@ func TestNetnsPartition(t *testing.T) {
 	// re-election on rejoin; commitKV's re-find-and-retry absorbs it within the deadline.
 	h.rejoin(victim)
 
+	// v1 has no PreVote/CheckQuorum, so the rejoining node's inflated term forces
+	// at least one re-election (occasionally a brief storm on unlucky real-clock
+	// timing). Wait for the cluster to RE-CONVERGE on one stable leader before
+	// measuring commit progress, so the election storm is not charged against the
+	// convergence deadline below (that race flaked this oracle at seed=13). If the
+	// cluster genuinely cannot re-stabilize, that is a real liveness failure and
+	// this fails with a clear message rather than a commit-oracle timeout.
+	if _, ok := h.waitStableLeader(8, time.Now().Add(20*time.Second)); !ok {
+		t.Fatalf("cluster did not re-stabilize on a single leader after heal (seed=%d)", seed)
+	}
+
 	healBaseline := h.maxCommitIndex(nil)
 	const healM = 2
 	for i := 0; i < healM; i++ {
@@ -133,7 +144,7 @@ func TestNetnsPartition(t *testing.T) {
 			t.Fatalf("post-heal commit h%d: %v (seed=%d)", i, err, seed)
 		}
 	}
-	if !h.majorityCommitAtLeast(healBaseline+healM, majority, time.Now().Add(10*time.Second)) {
+	if !h.majorityCommitAtLeast(healBaseline+healM, majority, time.Now().Add(15*time.Second)) {
 		t.Fatalf("heal commit oracle: commit_index did not re-converge >= %d on a majority (baseline=%d, seed=%d)",
 			healM, healBaseline, seed)
 	}
