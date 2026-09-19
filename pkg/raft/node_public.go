@@ -339,7 +339,18 @@ func (n *nodeImpl) Propose(ctx context.Context, data []byte) (Index, Term, any, 
 	}
 	idx, ok := n.core.proposeLocked(data)
 	term := n.core.currentTerm
+	var ch chan proposeResult
 	if ok {
+		// Register the waiter BEFORE releasing the lock. FRICTION-08's immediate
+		// flush can apply this entry and resolve the waiter as soon as the lock is
+		// dropped — for a single-node cluster broadcastAppendEntriesLocked commits
+		// synchronously, so the wake below drives apply almost immediately. If the
+		// waiter were stored after unlock, the applier's LoadAndDelete could run
+		// first, drop the result, and this Propose would block forever. Storing
+		// under the lock (and before the broadcast queues/commits anything)
+		// guarantees the applier always finds the waiter.
+		ch = make(chan proposeResult, 1) // cap 1: applier's send never blocks (Pitfall 5)
+		n.waiters.Store(idx, ch)
 		// FRICTION-08: queue the AppendEntries fan-out now, under the same lock,
 		// so the flush below ships it immediately rather than on the next tick.
 		// (N=1 self-quorum commit also advances here via maybeAdvanceCommitLocked.)
@@ -351,8 +362,6 @@ func (n *nodeImpl) Propose(ctx context.Context, data []byte) (Index, Term, any, 
 	}
 	n.signalWake() // flush the queued AppendEntries + drain any new commit now
 
-	ch := make(chan proposeResult, 1) // cap 1: applier's send never blocks (Pitfall 5)
-	n.waiters.Store(idx, ch)
 	select {
 	case r := <-ch: // APPLIED (not just committed) — SC3
 		return idx, term, r.res, r.err
